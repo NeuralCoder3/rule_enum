@@ -1,6 +1,6 @@
 let write_header oc_header oc_report domain_name max_vars max_size =
   (match oc_header with Some oc ->
-     Printf.fprintf oc "size,enumerated,new_size_rules,new_kbo_rules,new_irreducibles,total_size_rules,total_kbo_rules,total_irreducible,time_total,time_enum,time_norm,time_eval,time_match,time_apply,time_group,time_pmap,time_post\n";
+     Printf.fprintf oc "size,enumerated,new_size_rules,new_kbo_rules,new_irreducibles,total_size_rules,total_kbo_rules,total_irreducible,time_total,time_enum,time_process,time_apply,time_group\n";
      flush oc | None -> ());
   (match oc_report with Some oc ->
      Printf.fprintf oc "=== Rule Enumeration Results ===\nDomain: %s, max vars: %d, max size: %d\n\n"
@@ -13,11 +13,10 @@ let write_iteration ?oc_header ?oc_report (s : Rule_enum.Algorithm.iter_summary)
   let nkr = List.length s.new_kbo_rules in
   let nir = List.length s.new_irreducibles in
   (match oc_header with Some oc ->
-     Printf.fprintf oc "%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n"
-       s.size s.enumerated nsr nkr nir
-       s.total_size_rules s.total_kbo_rules s.total_irreducible
-       s.time_total s.time_enum s.time_normalize s.time_eval
-       s.time_match s.time_apply s.time_group s.time_pmap s.time_post;
+      Printf.fprintf oc "%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f\n"
+        s.size s.enumerated nsr nkr nir
+        s.total_size_rules s.total_kbo_rules s.total_irreducible
+        s.time_total s.time_enum s.time_process s.time_apply s.time_group;
      flush oc | None -> ());
   (match oc_report with Some oc ->
      Printf.fprintf oc "--- Size %d (enumerated %d, %.3fs) ---\n" s.size s.enumerated s.time_total;

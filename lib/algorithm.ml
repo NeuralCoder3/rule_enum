@@ -3,8 +3,8 @@
  *
  * Each iteration n:
  *   1. Enumerate canonical terms of size n from previous irreducibles + variable holes.
- *   2. In parallel: simplify each term with known rules, evaluate on inputs,
- *      compare behaviour against existing irreducibles.
+ *   2. In parallel: simplify each term, evaluate on inputs, compare behaviour
+ *      against existing irreducibles.
  *   3. Sequentially merge decisions: add size-/KBO- rules, collect candidates.
  *   4. Group candidates by behaviour; KBO-smallest per group becomes irreducible,
  *      others get KBO-simplifying rules.
@@ -25,7 +25,7 @@ let rec list_equal eq a b =
 type 'a rule_sets = {
   mutable size_rules : Types.rule list;
   mutable kbo_rules : Types.rule list;
-  mutable behaviors : (Types.term * 'a list) list;  (* irreducibles + their behaviour vectors *)
+  mutable behaviors : (Types.term * 'a list) list;
   inputs : 'a Eval.input list;
 }
 
@@ -47,59 +47,43 @@ let group_by cmp key_of_value values =
   in loop values []
 
 type iter_summary = {
-  size : int;
-  enumerated : int;
+  size : int;  enumerated : int;
   new_size_rules : Types.rule list;
   new_kbo_rules : Types.rule list;
   new_irreducibles : Types.term list;
-  total_size_rules : int;
-  total_kbo_rules : int;
-  total_irreducible : int;
-  time_total : float;
-  time_enum : float;
-  time_normalize : float;
-  time_eval : float;
-  time_match : float;
-  time_apply : float;
-  time_group : float;
-  time_pmap : float;
-  time_post : float;
+  total_size_rules : int;  total_kbo_rules : int;  total_irreducible : int;
+  time_total : float;  time_enum : float;  time_process : float;
+  time_apply : float;  time_group : float;
 }
 
-(* Per-term decision returned by parallel workers *)
 type 'a term_decision =
   | D_size_rule of Types.rule
   | D_kbo_rule of Types.rule
-  | D_replace of Types.term * Types.term * 'a list  (* old_irr, new_term, bv *)
+  | D_replace of Types.term * Types.term * 'a list
   | D_skip
   | D_candidate of Types.term * 'a list
 
 let process_term (dom : 'a Domain.t) ~inputs ~all_rules ~behaviors t =
-  let t0 = Sys.time () in
   let simplified, size_reduced = Rewrite.normalize all_rules t in
-  let t1 = Sys.time () in
   if size_reduced then None
   else
     let bv = Eval.behavior dom inputs simplified in
-    let t2 = Sys.time () in
     let rec search = function
-      | [] -> Some (D_candidate (simplified, bv), t1 -. t0, t2 -. t1, Sys.time () -. t2)
+      | [] -> Some (D_candidate (simplified, bv))
       | (irr, irr_bv) :: rest ->
         if not (list_equal dom.Domain.equal bv irr_bv) then search rest
         else
           let irr_sz = Types.size irr in
           let t_sz = Types.size simplified in
-          if irr_sz < t_sz then
-            Some (D_size_rule (simplified, irr), t1 -. t0, t2 -. t1, Sys.time () -. t2)
+          if irr_sz < t_sz then Some (D_size_rule (simplified, irr))
           else if irr_sz = t_sz then
             match Kbo.kbo_compare simplified irr with
-            | 0 -> Some (D_skip, t1 -. t0, t2 -. t1, Sys.time () -. t2)
-            | c when c > 0 -> Some (D_kbo_rule (simplified, irr), t1 -. t0, t2 -. t1, Sys.time () -. t2)
-            | _ -> Some (D_replace (irr, simplified, bv), t1 -. t0, t2 -. t1, Sys.time () -. t2)
+            | 0 -> Some D_skip
+            | c when c > 0 -> Some (D_kbo_rule (simplified, irr))
+            | _ -> Some (D_replace (irr, simplified, bv))
           else search rest
     in search behaviors
 
-(* Parallel map using OCaml 5 domains; falls back to sequential for small inputs *)
 let parallel_map ~num_domains f lst =
   let len = List.length lst in
   if num_domains <= 1 || len < num_domains * 2 then List.filter_map f lst
@@ -120,7 +104,6 @@ let parallel_map ~num_domains f lst =
     ) (split [] lst) in
     List.concat (List.map Stdlib.Domain.join domains)
 
-(* Apply decisions sequentially; returns (new_size_rules, new_kbo_rules, candidates) *)
 let apply_decisions (dom : 'a Domain.t) (rs : 'a rule_sets)
       (decisions : 'a term_decision list) =
   let new_size_rules = ref [] in
@@ -168,26 +151,20 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
   let inputs = rs.inputs in
   let all_rules_list = all_rules rs in
   let behaviors = rs.behaviors in
-  let t_pmap = Sys.time () in
-  let timed_decisions =
+  let decisions =
     parallel_map ~num_domains
       (process_term dom ~inputs ~all_rules:all_rules_list ~behaviors)
       enumerated
   in
-  let t_pmap = Sys.time () -. t_pmap in
-  let t_post = Sys.time () in
-  let t_norm = ref 0. in let t_eval = ref 0. in let t_match = ref 0. in
-  List.iter (fun (_, tn, te, tm) -> t_norm := !t_norm +. tn; t_eval := !t_eval +. te;
-                                      t_match := !t_match +. tm) timed_decisions;
-  let decisions = List.map (fun (d, _, _, _) -> d) timed_decisions in
-  let t_post = Sys.time () -. t_post in
-  let t_dec = Sys.time () in
+  let t_process = Sys.time () -. t_start -. t_enum in
+
+  let t_a0 = Sys.time () in
   let new_kbo_rules = ref [] in
   let new_size_rules, _kbo_from_dec, candidates = apply_decisions dom rs decisions in
   new_kbo_rules := _kbo_from_dec;
-  let t_apply = Sys.time () -. t_dec in
+  let t_apply = Sys.time () -. t_a0 in
 
-  let t_after_apply = Sys.time () in
+  let t_g0 = Sys.time () in
   let new_irreducibles = ref [] in
   let cmp = list_compare dom.Domain.compare in
   let groups = group_by cmp snd candidates in
@@ -203,8 +180,7 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
         new_kbo_rules := rule :: !new_kbo_rules))
       terms)
     groups;
-  let t_total = Sys.time () -. t_start in
-  let t_group = Sys.time () -. t_after_apply in
+  let t_group = Sys.time () -. t_g0 in
 
   { size = n;
     enumerated = List.length enumerated;
@@ -214,15 +190,11 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
     total_size_rules = List.length rs.size_rules;
     total_kbo_rules = List.length rs.kbo_rules;
     total_irreducible = List.length rs.behaviors;
-    time_total = t_total;
+    time_total = Sys.time () -. t_start;
     time_enum = t_enum;
-    time_normalize = !t_norm;
-    time_eval = !t_eval;
-    time_match = !t_match;
+    time_process = t_process;
     time_apply = t_apply;
     time_group = t_group;
-    time_pmap = t_pmap;
-    time_post = t_post;
   }
 
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ())

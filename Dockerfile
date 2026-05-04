@@ -5,11 +5,10 @@ RUN opam install -y dune
 WORKDIR /build
 COPY --chown=opam . .
 
-RUN opam exec -- dune build --profile=release \
- && cp _build/default/bin/main.exe /usr/local/bin/rule_enum
+RUN opam exec -- dune build --profile=release
 
 FROM alpine:3.20
-COPY --from=build /usr/local/bin/rule_enum /usr/local/bin/rule_enum
+COPY --from=build /build/_build/default/bin/main.exe /usr/local/bin/rule_enum
 
 ENTRYPOINT ["/usr/local/bin/rule_enum"]
 CMD ["--help"]
