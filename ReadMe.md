@@ -15,7 +15,7 @@ Keep irreducible terms in a set.
 
 To apply rules, we look at renamings. E.g. a-b+b -> a also applied in a*(b-c+c) -> a*b.
 
-To synthesize the minimal KBO term of a term t, we have 100 pre-determined random inputs.
+To synthesize the minimal KBO term of a term t, we have 100 pre-determined random inputs. (Not with SMT synthesis as written in the proof)
 For each irreducibile term, we keep a list of the result on these inputs. 
 If the term t behaves equivalent to a previous (smaller) irreducible term on all inputs, we return the smaller term (and the algorithm will add a size-reducing rule).
 If it differs to all previous irreducibile term, we keep it for now.

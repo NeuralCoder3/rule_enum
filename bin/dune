@@ -1,0 +1,4 @@
+(executable
+ (public_name rule_enum)
+ (name main)
+ (libraries rule_enum))
