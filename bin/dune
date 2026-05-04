@@ -2,3 +2,6 @@
  (public_name rule_enum)
  (name main)
  (libraries rule_enum))
+
+; (ocamlopt_flags (:standard -O3 -unbox-closures))
+; for flambda
