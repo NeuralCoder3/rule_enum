@@ -79,12 +79,12 @@ let test_rewrite () =
   let rules = [(rule_lhs, rule_rhs)] in
 
   let t1 = Types.Node ("+", [Types.Var "b"; Types.Var "b"]) in
-  let result1, size_red1 = Rewrite.normalize rules t1 in
+  let result1, size_red1 = Rewrite.normalize_with_index rules t1 in
   assert (Types.to_string result1 = "a");
   assert size_red1;
 
   let t2 = Types.Node ("+", [Types.Var "b"; Types.Var "c"]) in
-  let result2, size_red2 = Rewrite.normalize rules t2 in
+  let result2, size_red2 = Rewrite.normalize_with_index rules t2 in
   assert (Types.to_string result2 = "(a+b)");
   assert (not size_red2);
 

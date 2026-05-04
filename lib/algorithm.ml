@@ -63,8 +63,8 @@ type 'a term_decision =
   | D_skip
   | D_candidate of Types.term * 'a list
 
-let process_term (dom : 'a Domain.t) ~inputs ~all_rules ~behaviors t =
-  let simplified, size_reduced = Rewrite.normalize all_rules t in
+let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors t =
+  let simplified, size_reduced = Rewrite.normalize ~index:norm_index t in
   if size_reduced then None
   else
     let bv = Eval.behavior dom inputs simplified in
@@ -149,11 +149,11 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
   let t_enum = Sys.time () -. t_start in
 
   let inputs = rs.inputs in
-  let all_rules_list = all_rules rs in
+  let norm_index = Rewrite.index_rules (all_rules rs) in
   let behaviors = rs.behaviors in
   let decisions =
     parallel_map ~num_domains
-      (process_term dom ~inputs ~all_rules:all_rules_list ~behaviors)
+      (process_term dom ~inputs ~norm_index ~behaviors)
       enumerated
   in
   let t_process = Sys.time () -. t_start -. t_enum in
