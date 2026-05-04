@@ -1,23 +1,23 @@
+let rec list_compare elt_compare a b =
+  match a, b with
+  | [], [] -> 0
+  | [], _ -> -1
+  | _, [] -> 1
+  | x :: xs, y :: ys ->
+    (match elt_compare x y with
+     | 0 -> list_compare elt_compare xs ys
+     | c -> c)
+
 module BH = Map.Make (struct
-  type t = int list
-  let compare a b =
-    let rec go = function
-      | [], [] -> 0
-      | [], _ -> -1
-      | _, [] -> 1
-      | x :: xs, y :: ys ->
-        (match compare x y with
-         | 0 -> go (xs, ys)
-         | c -> c)
-    in
-    go (a, b)
+  type t = Domain.t list
+  let compare = list_compare Domain.compare
 end)
 
 type rule_sets = {
   mutable size_rules : Types.rule list;
   mutable kbo_rules : Types.rule list;
   mutable irreducible : Types.term list;
-  mutable behaviors : (Types.term * int list) list;
+  mutable behaviors : (Types.term * Domain.t list) list;
   inputs : Eval.input list;
 }
 
@@ -31,9 +31,16 @@ let create inputs = {
 
 let all_rules rs = rs.size_rules @ rs.kbo_rules
 
-let run_iteration (sig' : (string * int) list) (rs : rule_sets) (n : int) =
+let rec list_equal eq a b =
+  match a, b with
+  | [], [] -> true
+  | x :: xs, y :: ys -> eq x y && list_equal eq xs ys
+  | _ -> false
+
+let run_iteration (sig' : (string * int) list) (rs : rule_sets)
+      (n : int) (max_vars : int) =
   let candidates = ref [] in
-  let enumerated = Enum.enumerate_terms sig' rs.irreducible n in
+  let enumerated = Enum.enumerate_terms sig' rs.irreducible n max_vars in
 
   List.iter (fun t ->
     let all_r = all_rules rs in
@@ -42,7 +49,7 @@ let run_iteration (sig' : (string * int) list) (rs : rule_sets) (n : int) =
       let bv = Eval.behavior rs.inputs simplified in
       let matched = ref false in
       List.iter (fun (irr, irr_bv) ->
-        if (not !matched) && bv = irr_bv then (
+        if (not !matched) && list_equal Domain.equal bv irr_bv then (
           let irr_sz = Types.size irr in
           let t_sz = Types.size simplified in
           if irr_sz < t_sz then (
@@ -95,11 +102,12 @@ let run_iteration (sig' : (string * int) list) (rs : rule_sets) (n : int) =
     ) terms
   ) !by_behavior
 
-let run (sig' : (string * int) list) (max_size : int) (num_inputs : int) =
-  let inputs = Eval.generate_random_inputs num_inputs 10 in
+let run (sig' : (string * int) list) (max_size : int)
+      (num_inputs : int) (max_vars : int) =
+  let inputs = Eval.generate_random_inputs num_inputs max_vars in
   let rs = create inputs in
 
   for n = 1 to max_size do
-    run_iteration sig' rs n
+    run_iteration sig' rs n max_vars
   done;
   rs

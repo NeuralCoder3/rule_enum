@@ -12,6 +12,16 @@ let rec size = function
   | Hole _ -> 1
   | Node (_, args) -> 1 + List.fold_left (fun acc t -> acc + size t) 0 args
 
+let distinct_vars t =
+  let ht = Hashtbl.create 8 in
+  let rec collect = function
+    | Var v -> Hashtbl.replace ht v ()
+    | Hole _ -> ()
+    | Node (_, args) -> List.iter collect args
+  in
+  collect t;
+  Hashtbl.length ht
+
 let rec map_vars f = function
   | Var v -> Var (f v)
   | Hole n -> Hole n

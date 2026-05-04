@@ -68,10 +68,17 @@ let rec all_set_partitions (lst : int list) : (int * int) list list =
       with_new :: merged
     ) sub
 
+let block_count (part : (int * int) list) =
+  match part with
+  | [] -> 0
+  | _ -> 1 + List.fold_left (fun m (_, b) -> max m b) (-1) part
+
 let enumerate_terms (signature : (string * int) list)
-      (irreducible : Types.term list) (n : int) : Types.term list =
-  if n = 1 then
-    [Types.canonicalize (Types.Hole 0)]
+      (irreducible : Types.term list) (n : int) (max_vars : int) : Types.term list =
+  if n = 1 then (
+    let t = Types.canonicalize (Types.Hole 0) in
+    if Types.distinct_vars t <= max_vars then [t] else []
+  )
   else
     let irred_by_size = Hashtbl.create 16 in
     List.iter (fun t ->
@@ -127,24 +134,27 @@ let enumerate_terms (signature : (string * int) list)
             let term_with_holes = Types.Node (sym, args) in
             let hole_ids = List.sort_uniq compare !all_hole_ids in
             if List.length hole_ids <= 6 then
-              let partitions = all_set_partitions hole_ids in
+              let parts = all_set_partitions hole_ids in
               List.iter (fun part ->
-                let block_map = Hashtbl.create 16 in
-                List.iter (fun (id, block) ->
-                  Hashtbl.add block_map id block
-                ) part;
-                let rec apply_merge = function
-                  | Types.Hole id ->
-                    let block = Hashtbl.find block_map id in
-                    Types.Hole block
-                  | Types.Var v -> Types.Var v
-                  | Types.Node (f, args) ->
-                    Types.Node (f, List.map apply_merge args)
-                in
-                let merged = apply_merge term_with_holes in
-                let canon = Types.canonicalize merged in
-                add_term canon
-              ) partitions
+                if block_count part <= max_vars then (
+                  let block_map = Hashtbl.create 16 in
+                  List.iter (fun (id, block) ->
+                    Hashtbl.add block_map id block
+                  ) part;
+                  let rec apply_merge = function
+                    | Types.Hole id ->
+                      let block = Hashtbl.find block_map id in
+                      Types.Hole block
+                    | Types.Var v -> Types.Var v
+                    | Types.Node (f, args) ->
+                      Types.Node (f, List.map apply_merge args)
+                  in
+                  let merged = apply_merge term_with_holes in
+                  let canon = Types.canonicalize merged in
+                  if Types.distinct_vars canon <= max_vars then
+                    add_term canon
+                )
+              ) parts
           ) combinations
       ) part_list
     ) signature;

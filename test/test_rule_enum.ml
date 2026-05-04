@@ -19,6 +19,15 @@ let test_canonicalize () =
 
   Printf.printf "  canonicalize: OK\n"
 
+let test_distinct_vars () =
+  let t1 = Types.Var "a" in
+  assert (Types.distinct_vars t1 = 1);
+  let t2 = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
+  assert (Types.distinct_vars t2 = 2);
+  let t3 = Types.Node ("+", [Types.Var "a"; Types.Var "a"]) in
+  assert (Types.distinct_vars t3 = 1);
+  Printf.printf "  distinct_vars: OK\n"
+
 let test_size () =
   let a = Types.Var "a" in
   assert (Types.size a = 1);
@@ -78,42 +87,51 @@ let test_rewrite () =
 
   Printf.printf "  rewrite: OK\n"
 
-let test_eval () =
+let test_eval_int () =
   let inputs = [("a", 5); ("b", 3)] in
   let t1 = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
+  assert (Eval.eval inputs t1 = 5 + 3);
   assert (Eval.eval inputs t1 = 8);
 
   let t2 = Types.Node ("-", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval inputs t2 = 2);
+  assert (Eval.eval inputs t2 = 5 - 3);
 
   let t3 = Types.Node ("*", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval inputs t3 = 15);
+  assert (Eval.eval inputs t3 = 5 * 3);
 
-  (* a - b + b should be a *)
   let t4 = Types.Node ("+", [Types.Node ("-", [Types.Var "a"; Types.Var "b"]);
                               Types.Var "b"]) in
   assert (Eval.eval inputs t4 = 5);
 
-  Printf.printf "  eval: OK\n"
+  Printf.printf "  eval (int): OK\n"
 
-let test_enum_size_1 () =
-  let terms = Enum.enumerate_terms [("+", 2)] [] 1 in
+let test_enum () =
+  let terms = Enum.enumerate_terms [("+", 2)] [] 1 3 in
   assert (List.length terms = 1);
   assert (Types.to_string (List.hd terms) = "a");
-  Printf.printf "  enum size 1: OK\n"
 
-let test_enum_size_3 () =
   let irr = [Types.Var "a"] in
-  let terms = Enum.enumerate_terms [("+", 2)] irr 3 in
-  let strs = List.map Types.to_string terms |> List.sort String.compare in
+  let terms3 = Enum.enumerate_terms [("+", 2)] irr 3 3 in
+  let strs = List.map Types.to_string terms3 |> List.sort String.compare in
   assert (List.length strs >= 2);
   assert (List.mem "(a+a)" strs);
   assert (List.mem "(a+b)" strs);
-  Printf.printf "  enum size 3: OK\n"
+  Printf.printf "  enum: OK\n"
 
-let test_algorithm () =
+let test_enum_max_vars () =
+  let irr = [Types.Var "a"] in
+  let terms = Enum.enumerate_terms [("+", 2)] irr 3 1 in
+  List.iter (fun t ->
+    assert (Types.distinct_vars t <= 1)
+  ) terms;
+  let strs = List.map Types.to_string terms |> List.sort String.compare in
+  assert (List.mem "(a+a)" strs);
+  assert (not (List.mem "(a+b)" strs));
+  Printf.printf "  enum max_vars: OK\n"
+
+let test_algorithm_int () =
   let sig' = [("+", 2); ("-", 2)] in
-  let rs = Algorithm.run sig' 5 100 in
+  let rs = Algorithm.run sig' 5 100 3 in
 
   let rule_strs = List.map (fun (l, r) ->
     Types.to_string l ^ " -> " ^ Types.to_string r
@@ -123,17 +141,18 @@ let test_algorithm () =
   assert (List.mem "(a+(b-b)) -> a" rule_strs);
   assert (List.mem "((a+a)-a) -> a" rule_strs);
 
-  Printf.printf "  algorithm: OK\n"
+  Printf.printf "  algorithm (int): OK\n"
 
 let () =
   Printf.printf "Running tests...\n";
   test_canonicalize ();
+  test_distinct_vars ();
   test_size ();
   test_kbo ();
   test_match_renaming ();
   test_rewrite ();
-  test_eval ();
-  test_enum_size_1 ();
-  test_enum_size_3 ();
-  test_algorithm ();
+  test_eval_int ();
+  test_enum ();
+  test_enum_max_vars ();
+  test_algorithm_int ();
   Printf.printf "All tests passed!\n"
