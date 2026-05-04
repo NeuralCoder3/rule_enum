@@ -137,7 +137,7 @@ let test_enum_max_vars () =
 let test_algorithm_int () =
   let sig' = [("-", 1); ("+", 2); ("-", 2)] in
   let int_dom_small = { int_dom with Domain.signature = sig' } in
-  let rs = Algorithm.run int_dom_small 5 100 3 in
+  let rs, _iters = Algorithm.run ~max_size:5 int_dom_small 100 3 in
 
   let rule_strs = List.map (fun (l, r) ->
     Types.to_string l ^ " -> " ^ Types.to_string r
@@ -150,7 +150,7 @@ let test_algorithm_int () =
   Printf.printf "  algorithm (int): OK\n"
 
 let test_algorithm_bool () =
-  let rs = Algorithm.run bool_dom 5 100 2 in
+  let rs, _iters = Algorithm.run ~max_size:5 bool_dom 100 2 in
 
   assert (List.length rs.irreducible > 0);
   Printf.printf "  algorithm (bool): OK (irreducibles: %d, rules: %d)\n"
@@ -158,9 +158,9 @@ let test_algorithm_bool () =
     (List.length rs.size_rules + List.length rs.kbo_rules)
 
 let test_size_progression () =
-  let rs5 = Algorithm.run int_dom 5 100 3 in
-  let rs6 = Algorithm.run int_dom 6 100 3 in
-  let rs7 = Algorithm.run int_dom 7 100 3 in
+  let rs5, _ = Algorithm.run ~max_size:5 int_dom 100 3 in
+  let rs6, _ = Algorithm.run ~max_size:6 int_dom 100 3 in
+  let rs7, _ = Algorithm.run ~max_size:7 int_dom 100 3 in
 
   let count irr = List.length irr in
   assert (count rs6.irreducible > count rs5.irreducible);

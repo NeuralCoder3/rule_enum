@@ -47,7 +47,19 @@ let group_by cmp key_of_value values =
   in
   loop values []
 
-let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : int) =
+type iter_summary = {
+  size : int;
+  enumerated : int;
+  new_size_rules : Types.rule list;
+  new_kbo_rules : Types.rule list;
+  new_irreducibles : Types.term list;
+}
+
+let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : int)
+    : iter_summary =
+  let new_size_rules = ref [] in
+  let new_kbo_rules = ref [] in
+  let new_irreducibles = ref [] in
   let candidates = ref [] in
   let enumerated = Enum.enumerate_terms dom.Domain.signature rs.irreducible n max_vars in
 
@@ -62,16 +74,22 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : 
           let irr_sz = Types.size irr in
           let t_sz = Types.size simplified in
           if irr_sz < t_sz then (
-            rs.size_rules <- (simplified, irr) :: rs.size_rules;
+            let rule = (simplified, irr) in
+            rs.size_rules <- rule :: rs.size_rules;
+            new_size_rules := rule :: !new_size_rules;
             matched := true
           ) else if irr_sz = t_sz then (
             match Kbo.kbo_compare simplified irr with
             | 0 -> matched := true
             | c when c > 0 ->
-              rs.kbo_rules <- (simplified, irr) :: rs.kbo_rules;
+              let rule = (simplified, irr) in
+              rs.kbo_rules <- rule :: rs.kbo_rules;
+              new_kbo_rules := rule :: !new_kbo_rules;
               matched := true
             | _ ->
-              rs.kbo_rules <- (irr, simplified) :: rs.kbo_rules;
+              let rule = (irr, simplified) in
+              rs.kbo_rules <- rule :: rs.kbo_rules;
+              new_kbo_rules := rule :: !new_kbo_rules;
               let idx = ref (-1) in
               List.iteri (fun i (t', _) ->
                 if Types.term_eq t' irr then idx := i
@@ -100,17 +118,39 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : 
     let best = Kbo.minimum terms in
     rs.irreducible <- best :: rs.irreducible;
     rs.behaviors <- (best, bv) :: rs.behaviors;
+    new_irreducibles := best :: !new_irreducibles;
     List.iter (fun other ->
-      if not (Types.term_eq other best) then
-        rs.kbo_rules <- (other, best) :: rs.kbo_rules
+      if not (Types.term_eq other best) then (
+        let rule = (other, best) in
+        rs.kbo_rules <- rule :: rs.kbo_rules;
+        new_kbo_rules := rule :: !new_kbo_rules
+      )
     ) terms
-  ) by_behavior
+  ) by_behavior;
 
-let run (dom : 'a Domain.t) (max_size : int) (num_inputs : int) (max_vars : int) =
+  { size = n;
+    enumerated = List.length enumerated;
+    new_size_rules = List.rev !new_size_rules;
+    new_kbo_rules = List.rev !new_kbo_rules;
+    new_irreducibles = List.rev !new_irreducibles;
+  }
+
+let run ?max_size (dom : 'a Domain.t) (num_inputs : int) (max_vars : int) =
+  let default_max = match max_size with Some m -> m | None -> 12 in
   let inputs = Eval.generate_inputs dom num_inputs max_vars in
   let rs = create inputs in
-
-  for n = 1 to max_size do
-    run_iteration dom rs n max_vars
+  let results = ref [] in
+  let n = ref 1 in
+  let continue = ref true in
+  while !continue && !n <= default_max do
+    let summary = run_iteration dom rs !n max_vars in
+    if summary.new_size_rules = []
+       && summary.new_kbo_rules = []
+       && summary.new_irreducibles = [] then
+      continue := false
+    else begin
+      results := summary :: !results;
+      incr n
+    end
   done;
-  rs
+  (rs, List.rev !results)
