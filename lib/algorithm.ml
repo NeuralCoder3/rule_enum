@@ -53,6 +53,9 @@ type iter_summary = {
   new_size_rules : Types.rule list;
   new_kbo_rules : Types.rule list;
   new_irreducibles : Types.term list;
+  total_size_rules : int;
+  total_kbo_rules : int;
+  total_irreducible : int;
 }
 
 let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : int)
@@ -133,10 +136,13 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : 
     new_size_rules = List.rev !new_size_rules;
     new_kbo_rules = List.rev !new_kbo_rules;
     new_irreducibles = List.rev !new_irreducibles;
+    total_size_rules = List.length rs.size_rules;
+    total_kbo_rules = List.length rs.kbo_rules;
+    total_irreducible = List.length rs.irreducible;
   }
 
-let run ?max_size ?(forced_inputs = []) (dom : 'a Domain.t)
-      ~num_random_inputs ~max_vars =
+let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ())
+      (dom : 'a Domain.t) ~num_random_inputs ~max_vars =
   let default_max = match max_size with Some m -> m | None -> 12 in
   let random_inputs =
     if num_random_inputs > 0
@@ -156,6 +162,7 @@ let run ?max_size ?(forced_inputs = []) (dom : 'a Domain.t)
        && summary.new_irreducibles = [] then
       continue := false
     else begin
+      on_iteration summary;
       results := summary :: !results;
       incr n
     end
