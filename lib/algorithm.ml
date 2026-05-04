@@ -170,7 +170,9 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
       enumerated
   in
 
-  let new_size_rules, new_kbo_rules, candidates = apply_decisions dom rs decisions in
+  let new_kbo_rules = ref [] in
+  let new_size_rules, _kbo_from_decisions, candidates = apply_decisions dom rs decisions in
+  new_kbo_rules := _kbo_from_decisions;
 
   let new_irreducibles = ref [] in
   let cmp = list_compare dom.Domain.compare in
@@ -182,15 +184,18 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
     rs.behaviors <- (best, bv) :: rs.behaviors;
     new_irreducibles := best :: !new_irreducibles;
     List.iter (fun other ->
-      if not (Types.term_eq other best) then
-        rs.kbo_rules <- (other, best) :: rs.kbo_rules
+      if not (Types.term_eq other best) then (
+        let rule = (other, best) in
+        rs.kbo_rules <- rule :: rs.kbo_rules;
+        new_kbo_rules := rule :: !new_kbo_rules
+      )
     ) terms
   ) by_behavior;
 
   { size = n;
     enumerated = List.length enumerated;
     new_size_rules = List.rev new_size_rules;
-    new_kbo_rules = List.rev new_kbo_rules;
+    new_kbo_rules = List.rev !new_kbo_rules;
     new_irreducibles = List.rev !new_irreducibles;
     total_size_rules = List.length rs.size_rules;
     total_kbo_rules = List.length rs.kbo_rules;
@@ -208,13 +213,13 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ())
   if inputs = [] then
     failwith "Algorithm.run: no inputs provided (num_random_inputs=0 and no forced_inputs)";
   let rs = create inputs in
-  let ncpu = try Stdlib.Domain.recommended_domain_count () with _ -> 1 in
-  let nd = if num_domains > 0 then num_domains else ncpu in
+  let num_cpu = try Stdlib.Domain.recommended_domain_count () with _ -> 1 in
+  let num_threads = if num_domains > 0 then num_domains else num_cpu in
   let results = ref [] in
   let n = ref 1 in
   let continue = ref true in
   while !continue && !n <= default_max do
-    let summary = run_iteration dom rs !n max_vars ~num_domains:nd in
+    let summary = run_iteration dom rs !n max_vars ~num_domains:num_threads in
     if summary.new_size_rules = []
        && summary.new_kbo_rules = []
        && summary.new_irreducibles = [] then
