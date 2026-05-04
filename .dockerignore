@@ -1,0 +1,9 @@
+_build/
+.git/
+_build/
+enum_rules/
+.opam/
+*.csv
+output/
+*.txt
+*.md

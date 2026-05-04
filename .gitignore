@@ -1,3 +1,7 @@
 _build
 *.opam
 enum_rules
+*.md
+rules_*.txt
+*.csv
+output/
