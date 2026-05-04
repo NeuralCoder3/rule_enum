@@ -1,12 +1,12 @@
 let run_with (type a) (dom : a Rule_enum.Domain.t) forced num_rand
-      ~max_size ~max_vars ~domain_name ~output_file ~stats_file =
-  Printf.printf "Domain: %s,  max vars: %d,  random inputs: %d,  max size: %d\n\n%!"
-    domain_name max_vars num_rand max_size;
+      ~max_size ~max_vars ~domain_name ~output_file ~stats_file ~num_domains =
+  Printf.printf "Domain: %s,  max vars: %d,  random inputs: %d,  max size: %d,  jobs: %d\n\n%!"
+    domain_name max_vars num_rand max_size num_domains;
 
   let rs, iterations =
     Rule_enum.Algorithm.run ~max_size dom
       ~num_random_inputs:num_rand ~max_vars
-      ~forced_inputs:forced
+      ~forced_inputs:forced ~num_domains
       ~on_iteration:(fun (s : Rule_enum.Algorithm.iter_summary) ->
         Printf.printf "Size %d  enum=%d  +SR=%d  +KR=%d  +IR=%d  total: SR=%d KR=%d IR=%d\n%!"
           s.size s.enumerated
@@ -80,6 +80,7 @@ let () =
   let max_size = ref 7 in
   let output_file = ref "" in
   let stats_file = ref "" in
+  let jobs = ref 0 in
 
   let speclist = [
     ("--domain", Arg.Set_string domain_name,
@@ -96,6 +97,8 @@ let () =
      " FILE  Write all rules and stats to FILE");
     ("--stats", Arg.Set_string stats_file,
      " FILE  Write per-iteration stats as CSV to FILE");
+    ("--jobs", Arg.Set_int jobs,
+     " N  Number of parallel workers (0 = all cores, default: 0)");
   ] in
   let usage = "Usage: rule_enum [options]" in
   Arg.parse speclist (fun _ -> ()) usage;
@@ -110,12 +113,14 @@ let () =
     run_with dom [] num_rand
       ~max_size:!max_size ~max_vars:!max_vars ~domain_name:!domain_name
       ~output_file:!output_file ~stats_file:!stats_file
+      ~num_domains:!jobs
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vars else [] in
     run_with dom forced num_rand
       ~max_size:!max_size ~max_vars:!max_vars ~domain_name:!domain_name
       ~output_file:!output_file ~stats_file:!stats_file
+      ~num_domains:!jobs
   | _ ->
     Printf.eprintf "Unknown domain: %s (use int or bool)\n" !domain_name;
     exit 1
