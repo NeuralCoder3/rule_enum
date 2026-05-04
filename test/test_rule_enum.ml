@@ -152,21 +152,21 @@ let test_algorithm_int () =
 let test_algorithm_bool () =
   let rs, _iters = Algorithm.run ~max_size:5 bool_dom ~num_random_inputs:100 ~max_vars:2 in
 
-  assert (List.length rs.irreducible > 0);
+  assert (List.length rs.Algorithm.behaviors > 0);
   Printf.printf "  algorithm (bool): OK (irreducibles: %d, rules: %d)\n"
-    (List.length rs.irreducible)
-    (List.length rs.size_rules + List.length rs.kbo_rules)
+    (List.length rs.Algorithm.behaviors)
+    (List.length rs.Algorithm.size_rules + List.length rs.Algorithm.kbo_rules)
 
 let test_size_progression () =
   let rs5, _ = Algorithm.run ~max_size:5 int_dom ~num_random_inputs:100 ~max_vars:3 in
   let rs6, _ = Algorithm.run ~max_size:6 int_dom ~num_random_inputs:100 ~max_vars:3 in
   let rs7, _ = Algorithm.run ~max_size:7 int_dom ~num_random_inputs:100 ~max_vars:3 in
 
-  let count irr = List.length irr in
-  assert (count rs6.irreducible > count rs5.irreducible);
-  assert (count rs7.irreducible > count rs6.irreducible);
+  let count rs = List.length rs.Algorithm.behaviors in
+  assert (count rs6 > count rs5);
+  assert (count rs7 > count rs6);
   Printf.printf "  size progression: OK (5:%d, 6:%d, 7:%d)\n"
-    (count rs5.irreducible) (count rs6.irreducible) (count rs7.irreducible)
+    (count rs5) (count rs6) (count rs7)
 
 let test_forced_inputs () =
   let forced = [
@@ -177,9 +177,9 @@ let test_forced_inputs () =
   ] in
   let rs, _ = Algorithm.run ~max_size:3 bool_dom
       ~num_random_inputs:0 ~max_vars:2 ~forced_inputs:forced in
-  assert (List.length rs.irreducible > 0);
+  assert (List.length rs.Algorithm.behaviors > 0);
   Printf.printf "  forced inputs (bool, exhaustive): OK (irreducibles: %d)\n"
-    (List.length rs.irreducible)
+    (List.length rs.Algorithm.behaviors)
 
 let test_all_bool_inputs () =
   let forced = Domain_bool.all_inputs 2 in
@@ -188,7 +188,7 @@ let test_all_bool_inputs () =
       ~num_random_inputs:0 ~max_vars:2 ~forced_inputs:forced in
   let rs_rand, _ = Algorithm.run ~max_size:3 bool_dom
       ~num_random_inputs:100 ~max_vars:2 in
-  assert (List.length rs.irreducible = List.length rs_rand.irreducible);
+  assert (List.length rs.Algorithm.behaviors = List.length rs_rand.Algorithm.behaviors);
   Printf.printf "  all_bool_inputs: OK (exhaustive matches random at size 3)\n"
 
 let () =

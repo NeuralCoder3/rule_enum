@@ -1,4 +1,4 @@
-(lang dune 3.20)
+(lang dune 3.17)
 
 (name rule_enum)
 
