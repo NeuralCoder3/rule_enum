@@ -1,3 +1,3 @@
 (library
  (name rule_enum)
- (modules types kbo domain_int domain_bool domain eval rewrite enum algorithm))
+ (modules types kbo domain domain_int domain_bool eval rewrite enum algorithm))

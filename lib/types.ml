@@ -134,6 +134,8 @@ let apply_renaming mapping t =
 let rec to_string = function
   | Var v -> v
   | Hole n -> "?" ^ string_of_int n
+  | Node (f, [a]) when String.length f = 1 ->
+    "(" ^ f ^ to_string a ^ ")"
   | Node (f, [a; b]) when String.length f = 1 ->
     "(" ^ to_string a ^ f ^ to_string b ^ ")"
   | Node (f, args) ->

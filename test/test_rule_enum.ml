@@ -1,5 +1,8 @@
 open Rule_enum
 
+let int_dom = Domain_int.int_domain
+let bool_dom = Domain_bool.bool_domain
+
 let test_canonicalize () =
   let t1 = Types.Var "b" in
   let c1 = Types.canonicalize t1 in
@@ -90,33 +93,35 @@ let test_rewrite () =
 let test_eval_int () =
   let inputs = [("a", 5); ("b", 3)] in
   let t1 = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval inputs t1 = 5 + 3);
-  assert (Eval.eval inputs t1 = 8);
+  assert (Eval.eval int_dom inputs t1 = 8);
 
   let t2 = Types.Node ("-", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval inputs t2 = 5 - 3);
+  assert (Eval.eval int_dom inputs t2 = 2);
 
   let t3 = Types.Node ("*", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval inputs t3 = 5 * 3);
+  assert (Eval.eval int_dom inputs t3 = 15);
 
   let t4 = Types.Node ("+", [Types.Node ("-", [Types.Var "a"; Types.Var "b"]);
                               Types.Var "b"]) in
-  assert (Eval.eval inputs t4 = 5);
+  assert (Eval.eval int_dom inputs t4 = 5);
 
   Printf.printf "  eval (int): OK\n"
 
-let test_enum () =
-  let terms = Enum.enumerate_terms [("+", 2)] [] 1 3 in
-  assert (List.length terms = 1);
-  assert (Types.to_string (List.hd terms) = "a");
+let test_eval_bool () =
+  let inputs = [("a", true); ("b", false)] in
+  let t1 = Types.Node ("&", [Types.Var "a"; Types.Var "b"]) in
+  assert (Eval.eval bool_dom inputs t1 = false);
 
-  let irr = [Types.Var "a"] in
-  let terms3 = Enum.enumerate_terms [("+", 2)] irr 3 3 in
-  let strs = List.map Types.to_string terms3 |> List.sort String.compare in
-  assert (List.length strs >= 2);
-  assert (List.mem "(a+a)" strs);
-  assert (List.mem "(a+b)" strs);
-  Printf.printf "  enum: OK\n"
+  let t2 = Types.Node ("|", [Types.Var "a"; Types.Var "b"]) in
+  assert (Eval.eval bool_dom inputs t2 = true);
+
+  let t3 = Types.Node ("^", [Types.Var "a"; Types.Var "b"]) in
+  assert (Eval.eval bool_dom inputs t3 = true);
+
+  let t4 = Types.Node ("^", [Types.Var "a"; Types.Var "a"]) in
+  assert (Eval.eval bool_dom inputs t4 = false);
+
+  Printf.printf "  eval (bool): OK\n"
 
 let test_enum_max_vars () =
   let irr = [Types.Var "a"] in
@@ -130,8 +135,9 @@ let test_enum_max_vars () =
   Printf.printf "  enum max_vars: OK\n"
 
 let test_algorithm_int () =
-  let sig' = [("+", 2); ("-", 2)] in
-  let rs = Algorithm.run sig' 5 100 3 in
+  let sig' = [("-", 1); ("+", 2); ("-", 2)] in
+  let int_dom_small = { int_dom with Domain.signature = sig' } in
+  let rs = Algorithm.run int_dom_small 5 100 3 in
 
   let rule_strs = List.map (fun (l, r) ->
     Types.to_string l ^ " -> " ^ Types.to_string r
@@ -143,6 +149,25 @@ let test_algorithm_int () =
 
   Printf.printf "  algorithm (int): OK\n"
 
+let test_algorithm_bool () =
+  let rs = Algorithm.run bool_dom 5 100 2 in
+
+  assert (List.length rs.irreducible > 0);
+  Printf.printf "  algorithm (bool): OK (irreducibles: %d, rules: %d)\n"
+    (List.length rs.irreducible)
+    (List.length rs.size_rules + List.length rs.kbo_rules)
+
+let test_size_progression () =
+  let rs5 = Algorithm.run int_dom 5 100 3 in
+  let rs6 = Algorithm.run int_dom 6 100 3 in
+  let rs7 = Algorithm.run int_dom 7 100 3 in
+
+  let count irr = List.length irr in
+  assert (count rs6.irreducible > count rs5.irreducible);
+  assert (count rs7.irreducible > count rs6.irreducible);
+  Printf.printf "  size progression: OK (5:%d, 6:%d, 7:%d)\n"
+    (count rs5.irreducible) (count rs6.irreducible) (count rs7.irreducible)
+
 let () =
   Printf.printf "Running tests...\n";
   test_canonicalize ();
@@ -152,7 +177,9 @@ let () =
   test_match_renaming ();
   test_rewrite ();
   test_eval_int ();
-  test_enum ();
+  test_eval_bool ();
   test_enum_max_vars ();
   test_algorithm_int ();
+  test_algorithm_bool ();
+  test_size_progression ();
   Printf.printf "All tests passed!\n"

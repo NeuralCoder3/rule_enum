@@ -8,17 +8,18 @@ let rec list_compare elt_compare a b =
      | 0 -> list_compare elt_compare xs ys
      | c -> c)
 
-module BH = Map.Make (struct
-  type t = Domain.t list
-  let compare = list_compare Domain.compare
-end)
+let rec list_equal eq a b =
+  match a, b with
+  | [], [] -> true
+  | x :: xs, y :: ys -> eq x y && list_equal eq xs ys
+  | _ -> false
 
-type rule_sets = {
+type 'a rule_sets = {
   mutable size_rules : Types.rule list;
   mutable kbo_rules : Types.rule list;
   mutable irreducible : Types.term list;
-  mutable behaviors : (Types.term * Domain.t list) list;
-  inputs : Eval.input list;
+  mutable behaviors : (Types.term * 'a list) list;
+  inputs : 'a Eval.input list;
 }
 
 let create inputs = {
@@ -31,25 +32,33 @@ let create inputs = {
 
 let all_rules rs = rs.size_rules @ rs.kbo_rules
 
-let rec list_equal eq a b =
-  match a, b with
-  | [], [] -> true
-  | x :: xs, y :: ys -> eq x y && list_equal eq xs ys
-  | _ -> false
+let group_by cmp key_of_value values =
+  let rec loop values acc =
+    match values with
+    | [] -> acc
+    | v :: rest ->
+      let k = key_of_value v in
+      let rec insert = function
+        | [] -> [(k, [v])]
+        | (k', vs) :: tl when cmp k k' = 0 -> (k', v :: vs) :: tl
+        | pair :: tl -> pair :: insert tl
+      in
+      loop rest (insert acc)
+  in
+  loop values []
 
-let run_iteration (sig' : (string * int) list) (rs : rule_sets)
-      (n : int) (max_vars : int) =
+let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : int) =
   let candidates = ref [] in
-  let enumerated = Enum.enumerate_terms sig' rs.irreducible n max_vars in
+  let enumerated = Enum.enumerate_terms dom.Domain.signature rs.irreducible n max_vars in
 
   List.iter (fun t ->
     let all_r = all_rules rs in
     let simplified, size_reduced = Rewrite.normalize all_r t in
     if not size_reduced then (
-      let bv = Eval.behavior rs.inputs simplified in
+      let bv = Eval.behavior dom rs.inputs simplified in
       let matched = ref false in
       List.iter (fun (irr, irr_bv) ->
-        if (not !matched) && list_equal Domain.equal bv irr_bv then (
+        if (not !matched) && list_equal dom.Domain.equal bv irr_bv then (
           let irr_sz = Types.size irr in
           let t_sz = Types.size simplified in
           if irr_sz < t_sz then (
@@ -84,15 +93,10 @@ let run_iteration (sig' : (string * int) list) (rs : rule_sets)
     )
   ) enumerated;
 
-  let by_behavior = ref BH.empty in
-  List.iter (fun (t, bv) ->
-    by_behavior := BH.update bv (function
-      | None -> Some [t]
-      | Some ts -> Some (t :: ts)
-    ) !by_behavior
-  ) !candidates;
-
-  BH.iter (fun bv terms ->
+  let cmp = list_compare dom.Domain.compare in
+  let by_behavior = group_by cmp snd !candidates in
+  List.iter (fun (bv, term_pairs) ->
+    let terms = List.map fst term_pairs in
     let best = Kbo.minimum terms in
     rs.irreducible <- best :: rs.irreducible;
     rs.behaviors <- (best, bv) :: rs.behaviors;
@@ -100,14 +104,13 @@ let run_iteration (sig' : (string * int) list) (rs : rule_sets)
       if not (Types.term_eq other best) then
         rs.kbo_rules <- (other, best) :: rs.kbo_rules
     ) terms
-  ) !by_behavior
+  ) by_behavior
 
-let run (sig' : (string * int) list) (max_size : int)
-      (num_inputs : int) (max_vars : int) =
-  let inputs = Eval.generate_random_inputs num_inputs max_vars in
+let run (dom : 'a Domain.t) (max_size : int) (num_inputs : int) (max_vars : int) =
+  let inputs = Eval.generate_inputs dom num_inputs max_vars in
   let rs = create inputs in
 
   for n = 1 to max_size do
-    run_iteration sig' rs n max_vars
+    run_iteration dom rs n max_vars
   done;
   rs

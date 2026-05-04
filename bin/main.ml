@@ -1,16 +1,15 @@
 let () =
   Random.self_init ();
+  (* let dom = Rule_enum.Domain_int.int_domain in *)
+  let dom = Rule_enum.Domain_bool.bool_domain in
   let max_size = 5 in
   let num_inputs = 100 in
-  let max_vars = 3 in
-  let signature = [
-    ("+", 2);
-    ("-", 2);
-    ("*", 2);
-  ] in
-  Printf.printf "Domain: int, max vars: %d, max size: %d\n%!"
+  let max_vars = 2 in
+
+  Printf.printf "Domain: bool, max vars: %d, max size: %d\n%!"
     max_vars max_size;
-  let rs = Rule_enum.Algorithm.run signature max_size num_inputs max_vars in
+
+  let rs = Rule_enum.Algorithm.run dom max_size num_inputs max_vars in
   Printf.printf "\n=== Size-reducing rules (count: %d) ===\n"
     (List.length rs.size_rules);
   List.iter (fun (l, r) ->
@@ -28,11 +27,8 @@ let () =
   List.iter (fun t ->
     Printf.printf "  %s  (size %d)\n"
       (Rule_enum.Types.to_string t) (Rule_enum.Types.size t)
-  ) rs.irreducible ;
-  Printf.printf "\n Size-reducing rules: %d\n" (List.length rs.size_rules);
-  Printf.printf " KBO-simplifying rules: %d\n" (List.length rs.kbo_rules);
-  Printf.printf " Irreducible terms: %d\n" (List.length rs.irreducible);
+  ) rs.irreducible;
+  Printf.printf "\nSize-reducing rules: %d\n"    (List.length rs.size_rules);
+  Printf.printf "KBO-simplifying rules: %d\n" (List.length rs.kbo_rules);
+  Printf.printf "Irreducible terms: %d\n"     (List.length rs.irreducible);
   ()
-
-   
- 
