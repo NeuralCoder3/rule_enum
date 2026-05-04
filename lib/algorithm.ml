@@ -135,9 +135,16 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int) (max_vars : 
     new_irreducibles = List.rev !new_irreducibles;
   }
 
-let run ?max_size (dom : 'a Domain.t) (num_inputs : int) (max_vars : int) =
+let run ?max_size ?(forced_inputs = []) (dom : 'a Domain.t)
+      ~num_random_inputs ~max_vars =
   let default_max = match max_size with Some m -> m | None -> 12 in
-  let inputs = Eval.generate_inputs dom num_inputs max_vars in
+  let random_inputs =
+    if num_random_inputs > 0
+    then Eval.generate_inputs dom num_random_inputs max_vars
+    else [] in
+  let inputs = forced_inputs @ random_inputs in
+  if inputs = [] then
+    failwith "Algorithm.run: no inputs provided (num_random_inputs=0 and no forced_inputs)";
   let rs = create inputs in
   let results = ref [] in
   let n = ref 1 in

@@ -24,3 +24,16 @@ let bool_domain : bool Domain.t = {
     ("^", 2);
   ];
 }
+
+let all_inputs max_vars =
+  let var_names = List.init max_vars (fun i ->
+    String.make 1 (Char.chr (Char.code 'a' + i))) in
+  let rec go = function
+    | [] -> [[]]
+    | v :: vs ->
+      let rest = go vs in
+      List.concat_map (fun assigns ->
+        [(v, true) :: assigns; (v, false) :: assigns]
+      ) rest
+  in
+  go var_names

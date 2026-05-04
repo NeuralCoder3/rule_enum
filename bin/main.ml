@@ -1,12 +1,12 @@
 let () =
   Random.self_init ();
-  let dom = Rule_enum.Domain_int.int_domain in
-  let num_inputs = 100 in
-  let max_vars = 3 in
+  let dom = Rule_enum.Domain_bool.bool_domain in
+  let max_vars = 2 in
 
-  Printf.printf "Domain: int,  max vars: %d,  inputs: %d\n\n%!" max_vars num_inputs;
+  Printf.printf "Domain: bool,  max vars: %d\n\n%!" max_vars;
 
-  let rs, iterations = Rule_enum.Algorithm.run ~max_size:7 dom num_inputs max_vars in
+  let rs, iterations = Rule_enum.Algorithm.run ~max_size:8 dom ~max_vars
+      ~num_random_inputs:0 ~forced_inputs:(Rule_enum.Domain_bool.all_inputs max_vars) in
 
   List.iter (fun (summary : Rule_enum.Algorithm.iter_summary) ->
     let n = summary.size in
