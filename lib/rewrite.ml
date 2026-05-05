@@ -1,5 +1,5 @@
 (* Index rules by (root_symbol, arity, LHS_size) for O(1) lookup *)
-type rule_index = (string * int * int, Types.rule list) Hashtbl.t
+type rule_index = (int * int * int, Types.rule list) Hashtbl.t
 
 let index_rules rules =
   let idx = Hashtbl.create 64 in

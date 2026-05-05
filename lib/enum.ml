@@ -62,13 +62,13 @@ let apply_partition (part : (int * int) list) max_vars t =
     let rec go = function
       | Types.Hole id ->
         let b = hole_map.(id) in
-        (match Hashtbl.find_opt var_of_block b with
-         | Some v -> Types.Var v
-         | None ->
-           let v = String.make 1 (Char.chr (Char.code 'a' + !next_var)) in
-           incr next_var;
-           Hashtbl.add var_of_block b v;
-           Types.Var v)
+         (match Hashtbl.find_opt var_of_block b with
+          | Some v -> Types.Var v
+          | None ->
+            let v = !next_var in
+            incr next_var;
+            Hashtbl.add var_of_block b v;
+            Types.Var v)
       | Types.Var v -> Types.Var v
       | Types.Node (f, args) -> Types.Node (f, List.map go args)
     in
@@ -81,7 +81,7 @@ type subterm = FreshHole | IrredCopy of Types.term
 let enumerate_terms (signature : (string * int) list)
       (irreducible : Types.term list) (n : int) (max_vars : int) : Types.term list =
   if n = 1 then
-    if max_vars >= 1 then [Types.Var "a"] else []
+    if max_vars >= 1 then [Types.Var 0] else []
   else
     let by_size = Hashtbl.create 16 in
     List.iter (fun t ->
@@ -106,6 +106,7 @@ let enumerate_terms (signature : (string * int) list)
     in
 
     List.iter (fun (sym, arity) ->
+      let sym_int = Types.Sym.of_string sym in
       List.iter (fun part ->
         let opts_per_arg = List.map options_for part in
         if List.for_all (( <> ) []) opts_per_arg then
@@ -117,7 +118,7 @@ let enumerate_terms (signature : (string * int) list)
                               next_id := nid; t')
               choices
             in
-            let term = Types.Node (sym, args) in
+            let term = Types.Node (sym_int, args) in
             let hole_ids = List.init !next_id (fun i -> i) in
             let s = List.length hole_ids in
             if s <= 6 then

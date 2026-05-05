@@ -1,137 +1,77 @@
 open Rule_enum
 
+let v c = Types.Var (Char.code c - Char.code 'a')
+let n s args = Types.Node (Types.Sym.of_string s, args)
+
 let int_dom = Domain_int.int_domain
 let bool_dom = Domain_bool.bool_domain
 
 let test_canonicalize () =
-  let t1 = Types.Var "b" in
-  let c1 = Types.canonicalize t1 in
-  assert (Types.to_string c1 = "a");
-
-  let t2 = Types.Node ("+", [Types.Var "b"; Types.Var "a"]) in
-  let c2 = Types.canonicalize t2 in
-  assert (Types.to_string c2 = "(a+b)");
-
-  let t3 = Types.Node ("+", [Types.Var "x"; Types.Var "x"]) in
-  let c3 = Types.canonicalize t3 in
-  assert (Types.to_string c3 = "(a+a)");
-
-  let t4 = Types.Node ("-", [Types.Var "y"; Types.Var "x"]) in
-  let c4 = Types.canonicalize t4 in
-  assert (Types.to_string c4 = "(a-b)");
-
+  let c1 = Types.canonicalize (v 'b') in assert (Types.to_string c1 = "a");
+  let c2 = Types.canonicalize (n "+" [v 'b'; v 'a']) in assert (Types.to_string c2 = "(a+b)");
+  let c3 = Types.canonicalize (n "+" [v 'x'; v 'x']) in assert (Types.to_string c3 = "(a+a)");
+  let c4 = Types.canonicalize (n "-" [v 'y'; v 'x']) in assert (Types.to_string c4 = "(a-b)");
   Printf.printf "  canonicalize: OK\n"
 
 let test_distinct_vars () =
-  let t1 = Types.Var "a" in
-  assert (Types.distinct_vars t1 = 1);
-  let t2 = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
-  assert (Types.distinct_vars t2 = 2);
-  let t3 = Types.Node ("+", [Types.Var "a"; Types.Var "a"]) in
-  assert (Types.distinct_vars t3 = 1);
+  assert (Types.distinct_vars (v 'a') = 1);
+  assert (Types.distinct_vars (n "+" [v 'a'; v 'b']) = 2);
+  assert (Types.distinct_vars (n "+" [v 'a'; v 'a']) = 1);
   Printf.printf "  distinct_vars: OK\n"
 
 let test_size () =
-  let a = Types.Var "a" in
-  assert (Types.size a = 1);
-  let ab = Types.Node ("+", [a; Types.Var "b"]) in
-  assert (Types.size ab = 3);
-  let abc = Types.Node ("+", [ab; Types.Var "c"]) in
-  assert (Types.size abc = 5);
+  let a = v 'a' in assert (Types.size a = 1);
+  let ab = n "+" [a; v 'b'] in assert (Types.size ab = 3);
+  assert (Types.size (n "+" [ab; v 'c']) = 5);
   Printf.printf "  size: OK\n"
 
 let test_kbo () =
-  let a = Types.Var "a" in
-  let b = Types.Var "b" in
-  let apb = Types.Node ("+", [a; b]) in
-  assert (Kbo.lt a apb);
-
-  let apbpc = Types.Node ("+", [apb; Types.Var "c"]) in
-  let apbpc2 = Types.Node ("+", [a; Types.Node ("+", [b; Types.Var "c"])]) in
+  let a = v 'a' and b = v 'b' in
+  let apb = n "+" [a; b] in assert (Kbo.lt a apb);
+  let apbpc = n "+" [apb; v 'c'] in
+  let apbpc2 = n "+" [a; n "+" [b; v 'c']] in
   assert (Kbo.lt apbpc2 apbpc);
-
   Printf.printf "  kbo: OK\n"
 
 let test_match_renaming () =
-  let lhs = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
-  let t1 = Types.Node ("+", [Types.Var "x"; Types.Var "y"]) in
-  let m1 = Types.match_renaming lhs t1 in
-  assert (Option.is_some m1);
-
-  let t2 = Types.Node ("+", [Types.Var "x"; Types.Var "x"]) in
-  let m2 = Types.match_renaming lhs t2 in
-  assert (Option.is_none m2);
-
-  let lhs2 = Types.Node ("+", [Types.Var "a"; Types.Var "a"]) in
-  let t3 = Types.Node ("+", [Types.Var "x"; Types.Var "x"]) in
-  let m3 = Types.match_renaming lhs2 t3 in
-  assert (Option.is_some m3);
-
-  let t4 = Types.Node ("+", [Types.Var "x"; Types.Var "y"]) in
-  let m4 = Types.match_renaming lhs2 t4 in
-  assert (Option.is_none m4);
-
+  let lhs = n "+" [v 'a'; v 'b'] in
+  assert (Option.is_some (Types.match_renaming lhs (n "+" [v 'x'; v 'y'])));
+  assert (Option.is_none (Types.match_renaming lhs (n "+" [v 'x'; v 'x'])));
+  let lhs2 = n "+" [v 'a'; v 'a'] in
+  assert (Option.is_some (Types.match_renaming lhs2 (n "+" [v 'x'; v 'x'])));
+  assert (Option.is_none (Types.match_renaming lhs2 (n "+" [v 'x'; v 'y'])));
   Printf.printf "  match_renaming: OK\n"
 
 let test_rewrite () =
-  let rule_lhs = Types.Node ("+", [Types.Var "a"; Types.Var "a"]) in
-  let rule_rhs = Types.Var "a" in
-  let rules = [(rule_lhs, rule_rhs)] in
-
-  let t1 = Types.Node ("+", [Types.Var "b"; Types.Var "b"]) in
-  let result1, size_red1 = Rewrite.normalize_with_index rules t1 in
-  assert (Types.to_string result1 = "a");
-  assert size_red1;
-
-  let t2 = Types.Node ("+", [Types.Var "b"; Types.Var "c"]) in
-  let result2, size_red2 = Rewrite.normalize_with_index rules t2 in
-  assert (Types.to_string result2 = "(a+b)");
-  assert (not size_red2);
-
+  let rules = [(n "+" [v 'a'; v 'a'], v 'a')] in
+  let r1, sr1 = Rewrite.normalize_with_index rules (n "+" [v 'b'; v 'b']) in
+  assert (Types.to_string r1 = "a"); assert sr1;
+  let r2, sr2 = Rewrite.normalize_with_index rules (n "+" [v 'b'; v 'c']) in
+  assert (Types.to_string r2 = "(a+b)"); assert (not sr2);
   Printf.printf "  rewrite: OK\n"
 
 let test_eval_int () =
   let inputs = [("a", 5); ("b", 3)] in
-  let t1 = Types.Node ("+", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval int_dom inputs t1 = 8);
-
-  let t2 = Types.Node ("-", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval int_dom inputs t2 = 2);
-
-  let t3 = Types.Node ("*", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval int_dom inputs t3 = 15);
-
-  let t4 = Types.Node ("+", [Types.Node ("-", [Types.Var "a"; Types.Var "b"]);
-                              Types.Var "b"]) in
-  assert (Eval.eval int_dom inputs t4 = 5);
-
+  assert (Eval.eval int_dom inputs (n "+" [v 'a'; v 'b']) = 8);
+  assert (Eval.eval int_dom inputs (n "-" [v 'a'; v 'b']) = 2);
+  assert (Eval.eval int_dom inputs (n "*" [v 'a'; v 'b']) = 15);
+  assert (Eval.eval int_dom inputs (n "+" [n "-" [v 'a'; v 'b']; v 'b']) = 5);
   Printf.printf "  eval (int): OK\n"
 
 let test_eval_bool () =
   let inputs = [("a", true); ("b", false)] in
-  let t1 = Types.Node ("&", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval bool_dom inputs t1 = false);
-
-  let t2 = Types.Node ("|", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval bool_dom inputs t2 = true);
-
-  let t3 = Types.Node ("^", [Types.Var "a"; Types.Var "b"]) in
-  assert (Eval.eval bool_dom inputs t3 = true);
-
-  let t4 = Types.Node ("^", [Types.Var "a"; Types.Var "a"]) in
-  assert (Eval.eval bool_dom inputs t4 = false);
-
+  assert (Eval.eval bool_dom inputs (n "&" [v 'a'; v 'b']) = false);
+  assert (Eval.eval bool_dom inputs (n "|" [v 'a'; v 'b']) = true);
+  assert (Eval.eval bool_dom inputs (n "^" [v 'a'; v 'b']) = true);
+  assert (Eval.eval bool_dom inputs (n "^" [v 'a'; v 'a']) = false);
   Printf.printf "  eval (bool): OK\n"
 
 let test_enum_max_vars () =
-  let irr = [Types.Var "a"] in
+  let irr = [v 'a'] in
   let terms = Enum.enumerate_terms [("+", 2)] irr 3 1 in
-  List.iter (fun t ->
-    assert (Types.distinct_vars t <= 1)
-  ) terms;
+  List.iter (fun t -> assert (Types.distinct_vars t <= 1)) terms;
   let strs = List.map Types.to_string terms |> List.sort String.compare in
-  assert (List.mem "(a+a)" strs);
-  assert (not (List.mem "(a+b)" strs));
+  assert (List.mem "(a+a)" strs); assert (not (List.mem "(a+b)" strs));
   Printf.printf "  enum max_vars: OK\n"
 
 let test_algorithm_int () =

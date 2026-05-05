@@ -3,13 +3,13 @@ let rec kbo_compare t1 t2 =
   if s1 <> s2 then compare s1 s2
   else
     match t1, t2 with
-    | Var v1, Var v2 -> String.compare v1 v2
+    | Var v1, Var v2 -> Int.compare v1 v2
     | Hole n1, Hole n2 -> compare n1 n2
     | Var _, (Hole _ | Node _) -> -1
     | Hole _, (Var _ | Node _) -> -1
     | Node _, (Var _ | Hole _) -> 1
     | Node (f1, args1), Node (f2, args2) ->
-      match String.compare f1 f2 with
+      match Int.compare f1 f2 with
       | 0 -> lex_compare args1 args2
       | c -> c
 
