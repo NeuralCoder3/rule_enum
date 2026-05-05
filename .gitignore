@@ -5,3 +5,5 @@ enum_rules
 rules_*.txt
 *.csv
 output/
+*.cmi 
+*.cmo

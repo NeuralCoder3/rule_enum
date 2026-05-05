@@ -48,7 +48,7 @@ let canonicalize t =
     | Hole n ->
       (match Hashtbl.find_opt mapping n with
        | Some new_v -> Var new_v
-       | None -> let id = !next_id in incr next_id; Hashtbl.add mapping n id; Var id)
+       | None -> let id = !next_id in incr next_id;       Hashtbl.add mapping n id; Var id)
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 
