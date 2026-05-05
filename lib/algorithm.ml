@@ -27,9 +27,13 @@ type 'a rule_sets = {
   mutable kbo_rules : Types.rule list;
   mutable behaviors : (Types.term * 'a list) list;
   inputs : 'a Eval.input list;
+  norm_cache : (Types.term, Types.term * bool) Hashtbl.t;
 }
 
-let create inputs = { size_rules = []; kbo_rules = []; behaviors = []; inputs }
+let create inputs = {
+  size_rules = []; kbo_rules = []; behaviors = [];
+  inputs; norm_cache = Hashtbl.create 2048;
+}
 
 let irreducibles rs = List.map fst rs.behaviors
 let all_rules rs = rs.size_rules @ rs.kbo_rules
@@ -63,26 +67,31 @@ type 'a term_decision =
   | D_skip
   | D_candidate of Types.term * 'a list
 
-let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors t =
-  let simplified, size_reduced = Rewrite.normalize ~index:norm_index t in
-  if size_reduced then None
-  else
-    let bv = Eval.behavior dom inputs simplified in
-    let rec search = function
-      | [] -> Some (D_candidate (simplified, bv))
-      | (irr, irr_bv) :: rest ->
-        if not (list_equal dom.Domain.equal bv irr_bv) then search rest
-        else
-          let irr_sz = Types.size irr in
-          let t_sz = Types.size simplified in
-          if irr_sz < t_sz then Some (D_size_rule (simplified, irr))
-          else if irr_sz = t_sz then
-            match Kbo.kbo_compare simplified irr with
-            | 0 -> Some D_skip
-            | c when c > 0 -> Some (D_kbo_rule (simplified, irr))
-            | _ -> Some (D_replace (irr, simplified, bv))
-          else search rest
-    in search behaviors
+let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache t =
+  let rec search_bv bv simplified = function
+    | [] -> Some (D_candidate (simplified, bv))
+    | (irr, irr_bv) :: rest ->
+      if not (list_equal dom.Domain.equal bv irr_bv) then search_bv bv simplified rest
+      else
+        let irr_sz = Types.size irr in
+        let t_sz = Types.size simplified in
+        if irr_sz < t_sz then Some (D_size_rule (simplified, irr))
+        else if irr_sz = t_sz then
+          match Kbo.kbo_compare simplified irr with
+          | 0 -> Some D_skip
+          | c when c > 0 -> Some (D_kbo_rule (simplified, irr))
+          | _ -> Some (D_replace (irr, simplified, bv))
+        else search_bv bv simplified rest
+  in
+  match Hashtbl.find_opt norm_cache t with
+  | Some (simplified, size_reduced) ->
+    if size_reduced then None
+    else search_bv (Eval.behavior dom inputs simplified) simplified behaviors
+  | None ->
+    let simplified, size_reduced = Rewrite.normalize ~index:norm_index t in
+    Hashtbl.replace norm_cache t (simplified, size_reduced);
+    if size_reduced then None
+    else search_bv (Eval.behavior dom inputs simplified) simplified behaviors
 
 let parallel_map ~num_domains f lst =
   let len = List.length lst in
@@ -151,9 +160,10 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
   let inputs = rs.inputs in
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let behaviors = rs.behaviors in
+  let norm_cache = rs.norm_cache in
   let decisions =
     parallel_map ~num_domains
-      (process_term dom ~inputs ~norm_index ~behaviors)
+      (process_term dom ~inputs ~norm_index ~behaviors ~norm_cache)
       enumerated
   in
   let t_process = Sys.time () -. t_start -. t_enum in

@@ -1,12 +1,12 @@
-(* Index rules by (root_symbol, arity) for O(1) lookup during matching *)
-type rule_index = (string * int, Types.rule list) Hashtbl.t
+(* Index rules by (root_symbol, arity, LHS_size) for O(1) lookup *)
+type rule_index = (string * int * int, Types.rule list) Hashtbl.t
 
 let index_rules rules =
   let idx = Hashtbl.create 64 in
   List.iter (fun ((lhs, _) as rule) ->
     match lhs with
     | Types.Node (f, args) ->
-      let key = (f, List.length args) in
+      let key = (f, List.length args, Types.size lhs) in
       let existing = match Hashtbl.find_opt idx key with Some rs -> rs | None -> [] in
       Hashtbl.replace idx key (rule :: existing)
     | _ -> ()
@@ -22,7 +22,7 @@ let rec step ~index t =
   let root_match = match t with
     | Types.Var _ | Types.Hole _ -> None
     | Types.Node (f, args) ->
-      match Hashtbl.find_opt index (f, List.length args) with
+      match Hashtbl.find_opt index (f, List.length args, Types.size t) with
       | None -> None
       | Some indexed_rules ->
         let rec try_rules = function
