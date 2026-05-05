@@ -90,20 +90,24 @@ module TermSet = Set.Make (struct
   let compare = term_compare
 end)
 
+let rec assoc_opt x = function
+  | [] -> None
+  | (k, v) :: rest -> if k = x then Some v else assoc_opt x rest
+
 let match_renaming pattern target =
-  let map1 = Hashtbl.create 16 in
-  let map2 = Hashtbl.create 16 in
+  let map1 = ref [] in
+  let map2 = ref [] in
   let rec go p t =
     match p, t with
     | Var pv, Var tv ->
-      (match Hashtbl.find_opt map1 pv with
+      (match assoc_opt pv !map1 with
        | Some w -> w = tv
        | None ->
-         (match Hashtbl.find_opt map2 tv with
+         (match assoc_opt tv !map2 with
           | Some w -> w = pv
           | None ->
-            Hashtbl.add map1 pv tv;
-            Hashtbl.add map2 tv pv;
+            map1 := (pv, tv) :: !map1;
+            map2 := (tv, pv) :: !map2;
             true))
     | Var _, (Hole _ | Node _) -> false
     | Hole _, Hole _ -> false
@@ -113,19 +117,11 @@ let match_renaming pattern target =
       && List.for_all2 go pargs targs
     | Node _, (Var _ | Hole _) -> false
   in
-  if go pattern target then
-    Some (Hashtbl.fold (fun k v acc -> (k, v) :: acc) map1 [])
-  else
-    None
+  if go pattern target then Some !map1 else None
 
 let apply_renaming mapping t =
-  let tbl = Hashtbl.create 16 in
-  List.iter (fun (k, v) -> Hashtbl.add tbl k v) mapping;
   let rec go = function
-    | Var v ->
-      (match Hashtbl.find_opt tbl v with
-       | Some new_v -> Var new_v
-       | None -> Var v)
+    | Var v -> Var (match assoc_opt v mapping with Some w -> w | None -> v)
     | Hole _ as h -> h
     | Node (f, args) -> Node (f, List.map go args)
   in

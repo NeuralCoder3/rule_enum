@@ -28,11 +28,15 @@ type 'a rule_sets = {
   mutable behaviors : (Types.term * 'a list) list;
   inputs : 'a Eval.input list;
   norm_cache : (Types.term, Types.term * bool) Hashtbl.t;
+  mutable prof_norm : float;
+  mutable prof_eval : float;
+  mutable prof_match : float;
 }
 
 let create inputs = {
   size_rules = []; kbo_rules = []; behaviors = [];
   inputs; norm_cache = Hashtbl.create 2048;
+  prof_norm = 0.; prof_eval = 0.; prof_match = 0.;
 }
 
 let irreducibles rs = List.map fst rs.behaviors
@@ -57,6 +61,7 @@ type iter_summary = {
   new_irreducibles : Types.term list;
   total_size_rules : int;  total_kbo_rules : int;  total_irreducible : int;
   time_total : float;  time_enum : float;  time_process : float;
+  time_norm : float;  time_eval : float;  time_match : float;
   time_apply : float;  time_group : float;
 }
 
@@ -67,7 +72,8 @@ type 'a term_decision =
   | D_skip
   | D_candidate of Types.term * 'a list
 
-let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache t =
+let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache
+      ~prof_norm ~prof_eval ~prof_match t =
   let rec search_bv bv simplified = function
     | [] -> Some (D_candidate (simplified, bv))
     | (irr, irr_bv) :: rest ->
@@ -88,10 +94,19 @@ let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache 
     if size_reduced then None
     else search_bv (Eval.behavior dom inputs simplified) simplified behaviors
   | None ->
+    let t0 = Sys.time () in
     let simplified, size_reduced = Rewrite.normalize ~index:norm_index t in
+    let t1 = Sys.time () in
     Hashtbl.replace norm_cache t (simplified, size_reduced);
-    if size_reduced then None
-    else search_bv (Eval.behavior dom inputs simplified) simplified behaviors
+    if size_reduced then (prof_norm := !prof_norm +. (t1 -. t0); None)
+    else
+      let bv = Eval.behavior dom inputs simplified in
+      let t2 = Sys.time () in
+      let d = search_bv bv simplified behaviors in
+      prof_norm := !prof_norm +. (t1 -. t0);
+      prof_eval := !prof_eval +. (t2 -. t1);
+      prof_match := !prof_match +. (Sys.time () -. t2);
+      d
 
 let parallel_map ~num_domains f lst =
   let len = List.length lst in
@@ -161,9 +176,10 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let behaviors = rs.behaviors in
   let norm_cache = rs.norm_cache in
+  let pn = ref 0. in let pe = ref 0. in let pm = ref 0. in
   let decisions =
     parallel_map ~num_domains
-      (process_term dom ~inputs ~norm_index ~behaviors ~norm_cache)
+      (process_term dom ~inputs ~norm_index ~behaviors ~norm_cache ~prof_norm:pn ~prof_eval:pe ~prof_match:pm)
       enumerated
   in
   let t_process = Sys.time () -. t_start -. t_enum in
@@ -203,6 +219,7 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
     time_total = Sys.time () -. t_start;
     time_enum = t_enum;
     time_process = t_process;
+    time_norm = !pn;  time_eval = !pe;  time_match = !pm;
     time_apply = t_apply;
     time_group = t_group;
   }
