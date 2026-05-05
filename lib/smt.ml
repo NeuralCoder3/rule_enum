@@ -48,11 +48,12 @@ let rec encode_int vars = function
 
 (* Check if two terms are equivalent (domain = "bool" or "int").
    Returns Equivalent if unsat, CounterExample if sat, Unknown on error. *)
-let check_equiv (domain : string) vars t1 t2 =
+let check_equiv vars t1 t2 =
   let decls = List.map (fun (n, s) -> 
     (n, match s with "bool" -> mk_bool n | _ -> mk_int n))
     vars
   in
+  let domain = match vars with (_, s) :: _ -> s | [] -> "bool" in
   let vars_map = List.map (fun (n, e) -> (n, e)) decls in
   let encode = if domain = "bool" then encode_bool else encode_int in
   let e1 = encode vars_map t1 in

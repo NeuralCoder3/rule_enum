@@ -79,7 +79,7 @@ let process_term (dom : 'a Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache
     | (irr, irr_bv) :: rest ->
       let eq = if bv = [] && irr_bv = [] then
         if not use_smt then false
-        else match Smt.check_equiv "bool" smt_vars simplified irr with
+        else match Smt.check_equiv smt_vars simplified irr with
           | Smt.Equivalent -> true | _ -> false
       else list_equal dom.Domain.equal bv irr_bv
       in
@@ -205,8 +205,11 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
   let norm_cache = rs.norm_cache in
   let pn = ref 0. in let pe = ref 0. in let pm = ref 0. in
   let use_smt = rs.use_smt && inputs = [] in
+  let domain_sort = match dom.Domain.signature with
+    | ("+", _) :: _ | ("-", 1) :: _ | ("*", _) :: _ -> "int" | _ -> "bool"
+  in
   let smt_vars = if not use_smt then [] else
-    List.map (fun v -> (v, "bool"))
+    List.map (fun v -> (v, domain_sort))
       (List.map Types.var_name (List.init max_vars (fun i -> i))) in
   let nd = if use_smt then 1 else num_domains in  (* Z3 not thread-safe *)
   let decisions =
@@ -240,7 +243,7 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
             List.iteri (fun i g ->
               if !idx = -1 then
                 let rep = List.hd g in
-                let eq = try match Smt.check_equiv "bool" smt_vars t rep with
+                let eq = try match Smt.check_equiv smt_vars t rep with
                   | Smt.Equivalent -> true | _ -> false with _ -> false
                 in
                 if eq then idx := i
@@ -262,7 +265,7 @@ let run_iteration (dom : 'a Domain.t) (rs : 'a rule_sets) (n : int)
         let rep = fst (List.hd tp) in
         let same, diff = List.partition (fun (_, tp2) ->
           let rep2 = fst (List.hd tp2) in
-          try match Smt.check_equiv "bool" smt_vars rep rep2 with
+          try match Smt.check_equiv smt_vars rep rep2 with
           | Smt.Equivalent -> true | _ -> false with _ -> false
         ) rest in
         let merged_tp = List.fold_left (fun acc' (_, tp2) -> acc' @ tp2) tp same in
