@@ -36,6 +36,7 @@ let bool_domain : (symbol, bool) Domain.t = {
   ];
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.int_to_val = (fun n -> n <> 0);
   Domain.smt_sort = (fun ctx -> Z3.Boolean.mk_sort ctx);
   Domain.encode_op = (fun ctx sym args -> match sym, args with
     | Not, [a] -> Z3.Boolean.mk_not ctx a

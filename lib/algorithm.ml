@@ -8,17 +8,19 @@ let rec list_equal eq a b = match a, b with
   | [], [] -> true | x :: xs, y :: ys -> eq x y && list_equal eq xs ys | _ -> false
 
 type ('s, 'a) rule_sets = {
-  mutable size_rules : 's Types.rule list;
-  mutable kbo_rules  : 's Types.rule list;
-  mutable behaviors  : ('s Types.term * 'a list) list;
-  inputs          : 'a Eval.input list;
-  norm_cache      : ('s Types.term, 's Types.term * bool) Hashtbl.t;
-  use_smt         : bool;
+  mutable size_rules    : 's Types.rule list;
+  mutable kbo_rules     : 's Types.rule list;
+  mutable behaviors     : ('s Types.term * 'a list) list;
+  mutable forced_inputs : (string * int) list list;
+  inputs              : 'a Eval.input list;
+  norm_cache          : ('s Types.term, 's Types.term * bool) Hashtbl.t;
+  use_smt             : bool;
+  use_smt_forced      : bool;
 }
 
-let create ~use_smt inputs = {
-  size_rules = []; kbo_rules = []; behaviors = [];
-  inputs; norm_cache = Hashtbl.create 2048; use_smt;
+let create ~use_smt ~use_smt_forced inputs = {
+  size_rules = []; kbo_rules = []; behaviors = []; forced_inputs = [];
+  inputs; norm_cache = Hashtbl.create 2048; use_smt; use_smt_forced;
 }
 
 let irreducibles rs = List.map fst rs.behaviors
@@ -148,13 +150,16 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let enumerated = Enum.enumerate_terms dom.Domain.all_symbols (irreducibles rs) n max_vars in
   let t_enum = Sys.time () -. t_start in
   let inputs = rs.inputs in
+  let all_inputs = inputs @ if rs.use_smt_forced then List.map (fun vars ->
+    List.map (fun (v, n) -> (v, dom.Domain.int_to_val n)) vars) rs.forced_inputs
+  else [] in
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let use_smt = rs.use_smt && inputs = [] in
   let smt_vars = if not use_smt then [] else
     List.map Types.var_name (List.init max_vars (fun i -> i)) in
   let nd = if use_smt then 1 else num_domains in
   let decisions = parallel_map ~num_domains:nd
-    (process_term dom ~inputs ~norm_index ~behaviors:rs.behaviors ~norm_cache:rs.norm_cache ~use_smt ~smt_vars ~sym_cmp) enumerated in
+    (process_term dom ~inputs:all_inputs ~norm_index ~behaviors:rs.behaviors ~norm_cache:rs.norm_cache ~use_smt ~smt_vars ~sym_cmp) enumerated in
   let t_process = Sys.time () -. t_start -. t_enum in
   let new_kbo_rules = ref [] in let new_size_rules = ref [] in
   let _sr, _kr, candidates = apply_decisions dom rs decisions in
@@ -163,32 +168,41 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let new_irreducibles = ref [] in
   let cmp = list_compare dom.Domain.compare in
   let groups = group_by cmp snd candidates in
-  let groups =
-    if not rs.use_smt || rs.inputs <> [] then groups else
-    List.concat_map (fun (bv, term_pairs) ->
+  let groups = if not rs.use_smt || rs.inputs <> [] then groups else
+    let cex = ref [] in
+    let groups = List.concat_map (fun (bv, term_pairs) ->
       let all_terms = List.map fst term_pairs in match all_terms with [] -> [] | first :: rest ->
       let groups = ref [[first]] in
       List.iter (fun t -> let idx = ref (-1) in
         List.iteri (fun i g -> if !idx = -1 then
           let rep = List.hd g in
-          let eq = try match Smt.check_equiv dom smt_vars t rep with
-            Smt.Equivalent -> true | _ -> false with _ -> false in
-          if eq then idx := i) !groups;
+          (try match Smt.check_equiv dom smt_vars t rep with
+            Smt.Equivalent -> idx := i
+          |           Smt.CounterExample assigns -> if rs.use_smt_forced then cex := assigns :: !cex
+          | _ -> () with _ -> ())) !groups;
         match !idx with -1 -> groups := [t] :: !groups
         | i -> groups := List.mapi (fun j g -> if j = i then t :: g else g) !groups) rest;
-      List.map (fun g -> (bv, List.map (fun t -> (t, bv)) g)) !groups) groups
+      List.map (fun g -> (bv, List.map (fun t -> (t, bv)) g)) !groups) groups in
+    List.iter (fun assigns ->
+      rs.forced_inputs <- assigns :: rs.forced_inputs) !cex;
+    groups
   in
   let groups =
     if not rs.use_smt || rs.inputs <> [] then groups else
+    let cex2 = ref [] in
     let rec merge_all acc = function
       | [] -> acc | (bv, tp) :: rest ->
         let rep = fst (List.hd tp) in
         let same, diff = List.partition (fun (_, tp2) ->
-          try match Smt.check_equiv dom smt_vars rep (fst (List.hd tp2)) with
-            Smt.Equivalent -> true | _ -> false with _ -> false) rest in
+          match Smt.check_equiv dom smt_vars rep (fst (List.hd tp2)) with
+            Smt.Equivalent -> true
+          | Smt.CounterExample assigns -> (if rs.use_smt_forced then cex2 := assigns :: !cex2); false
+          | _ -> false) rest in
         let merged = List.fold_left (fun a (_, tp2) -> a @ tp2) tp same in
         merge_all ((bv, merged) :: acc) diff
-    in List.rev (merge_all [] groups)
+    in
+    List.iter (fun assigns -> rs.forced_inputs <- assigns :: rs.forced_inputs) !cex2;
+    List.rev (merge_all [] groups)
   in
   let new_irr_pairs = ref [] in
   List.iter (fun (_bv, term_pairs) ->
@@ -213,13 +227,13 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   }
 
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?(num_domains = 0)
-      ?(use_smt = false) (dom : ('s, 'a) Domain.t) ~num_random_inputs ~max_vars =
+      ?(use_smt = false) ?(use_smt_forced = false) (dom : ('s, 'a) Domain.t) ~num_random_inputs ~max_vars =
   let default_max = match max_size with Some m -> m | None -> 12 in
   let random_inputs = if num_random_inputs > 0 then Eval.generate_inputs dom num_random_inputs max_vars else [] in
   let inputs = forced_inputs @ random_inputs in
   if inputs = [] && not use_smt then
     failwith "Algorithm.run: no inputs and SMT disabled";
-  let rs = create ~use_smt inputs in
+  let rs = create ~use_smt ~use_smt_forced inputs in
   let nproc = try Stdlib.Domain.recommended_domain_count () with _ -> 1 in
   let threads = if num_domains > 0 then num_domains else nproc in
   let results = ref [] in let n = ref 1 in let continue = ref true in

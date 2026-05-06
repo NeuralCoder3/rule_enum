@@ -4,9 +4,10 @@ type ('s, 'a) t = {
   to_string : 'a -> string;
   equal     : 'a -> 'a -> bool;
   compare   : 'a -> 'a -> int;
-  all_symbols : (string * int * 's) list;  (* name * arity * symbol *)
+  all_symbols : (string * int * 's) list;
   sym_to_string : 's -> string;
   sym_compare  : 's -> 's -> int;
+  int_to_val : int -> 'a;
   smt_sort  : Z3.context -> Z3.Sort.sort;
   encode_op : Z3.context -> 's -> Z3.Expr.expr list -> Z3.Expr.expr;
 }

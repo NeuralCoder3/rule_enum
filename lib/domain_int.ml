@@ -35,6 +35,7 @@ let int_domain : (symbol, int) Domain.t = {
   ];
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.int_to_val = (fun n -> n);
   Domain.smt_sort = (fun ctx -> Z3.Arithmetic.Integer.mk_sort ctx);
   Domain.encode_op = (fun ctx sym args -> match sym, args with
     | Plus, [a; b] -> Z3.Arithmetic.mk_add ctx [a; b]

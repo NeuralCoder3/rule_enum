@@ -41,17 +41,17 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
   | None -> ()
 
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
-      ~max_size ~max_vars ~domain_name ~output_file ~stats_file ~num_domains ~use_smt =
+      ~max_size ~max_vars ~domain_name ~output_file ~stats_file ~num_domains ~use_smt ~use_smt_forced =
   let sym_str = dom.Rule_enum.Domain.sym_to_string in
-  Printf.printf "Domain: %s,  max vars: %d,  random inputs: %d,  max size: %d,  jobs: %d,  smt: %b\n\n%!"
-    domain_name max_vars num_rand max_size num_domains use_smt;
+  Printf.printf "Domain: %s,  max vars: %d,  random inputs: %d,  max size: %d,  jobs: %d,  smt: %b,  smt-forced: %b\n\n%!"
+    domain_name max_vars num_rand max_size num_domains use_smt use_smt_forced;
   let start_time = Unix.gettimeofday () in
   let oc_stats = if stats_file <> "" then Some (open_out stats_file) else None in
   let oc_report = if output_file <> "" then Some (open_out output_file) else None in
   write_header oc_stats oc_report domain_name max_vars max_size;
   let rs, _iters =
     Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand ~max_vars
-      ~forced_inputs:forced ~num_domains ~use_smt
+      ~forced_inputs:forced ~num_domains ~use_smt ~use_smt_forced
       ~on_iteration:(fun s ->
         let elapsed = Unix.gettimeofday () -. start_time in
         Printf.printf "Size %d  [%.1fs / %.1fs]  enum=%d  +SR=%d  +KR=%d  +IR=%d  total: SR=%d KR=%d IR=%d\n%!"
@@ -73,6 +73,7 @@ let () =
   let domain_name = ref "int" in let max_vars = ref 3 in let random_inputs = ref 100 in
   let use_full = ref false in let max_size = ref 7 in let output_file = ref "" in
   let stats_file = ref "" in let jobs = ref 0 in let use_smt = ref false in
+  let use_smt_forced = ref false in
   let speclist = [
     ("--domain", Arg.Set_string domain_name, " int|bool  Evaluation domain (default: int)");
     ("--max-vars", Arg.Set_int max_vars, " N  Maximum distinct variables (default: 3)");
@@ -83,17 +84,20 @@ let () =
     ("--stats", Arg.Set_string stats_file, " FILE  Write per-iteration CSV to FILE");
     ("--jobs", Arg.Set_int jobs, " N  Parallel workers (0 = all cores, default: 0)");
     ("--smt", Arg.Set use_smt, " Enable SMT refinement (requires z3 in PATH)");
+    ("--smt-forced", Arg.Set use_smt_forced, " Add SMT counterexamples to input set");
   ] in Arg.parse speclist (fun _ -> ()) "Usage: rule_enum [options]";
   Random.self_init ();
   let num_rand = if !use_full then 0 else !random_inputs in
   match !domain_name with
   | "int" -> run_with Rule_enum.Domain_int.int_domain [] num_rand
       ~max_size:!max_size ~max_vars:!max_vars ~domain_name:"int"
-      ~output_file:!output_file ~stats_file:!stats_file ~num_domains:!jobs ~use_smt:!use_smt
+      ~output_file:!output_file ~stats_file:!stats_file ~num_domains:!jobs
+      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vars else [] in
     run_with dom forced num_rand
       ~max_size:!max_size ~max_vars:!max_vars ~domain_name:"bool"
-      ~output_file:!output_file ~stats_file:!stats_file ~num_domains:!jobs ~use_smt:!use_smt
+      ~output_file:!output_file ~stats_file:!stats_file ~num_domains:!jobs
+      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
   | _ -> Printf.eprintf "Unknown domain: %s (use int or bool)\n" !domain_name; exit 1
