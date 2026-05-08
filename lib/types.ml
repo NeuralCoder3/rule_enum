@@ -43,7 +43,8 @@ let rec term_compare sym_cmp t1 t2 =
     | Var v1, Var v2 -> Int.compare v1 v2
     | Hole n1, Hole n2 -> Int.compare n1 n2
     | Var _, (Hole _ | Node _) -> -1
-    | Hole _, (Var _ | Node _) -> -1
+    | Hole _, Var _ -> 1
+    | Hole _, Node _ -> -1
     | Node _, (Var _ | Hole _) -> 1
     | Node (f1, args1), Node (f2, args2) ->
       match sym_cmp f1 f2 with

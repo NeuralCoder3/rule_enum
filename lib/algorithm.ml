@@ -14,13 +14,15 @@ type ('s, 'a) rule_sets = {
   mutable forced_inputs : (string * int) list list;
   inputs              : 'a Eval.input list;
   norm_cache          : ('s Types.term, 's Types.term * bool) Hashtbl.t;
+  norm_cache_mutex    : Mutex.t;
   use_smt             : bool;
   use_smt_forced      : bool;
 }
 
 let create ~use_smt ~use_smt_forced inputs = {
   size_rules = []; kbo_rules = []; behaviors = []; forced_inputs = [];
-  inputs; norm_cache = Hashtbl.create 2048; use_smt; use_smt_forced;
+  inputs; norm_cache = Hashtbl.create 2048;
+  norm_cache_mutex = Mutex.create (); use_smt; use_smt_forced;
 }
 
 let irreducibles rs = List.map fst rs.behaviors
@@ -57,7 +59,7 @@ type ('s, 'a) term_decision =
 
 type match_kind = Size | Kbo | Replace | Skip
 
-let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache
+let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache ~norm_cache_mutex
       ~use_smt ~smt_vars ~sym_cmp t =
   let rec find_best bv simplified best = function
     | [] -> best
@@ -73,18 +75,25 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_
         match best with
         | None -> find_best bv simplified (Some (irr, Size)) rest
         | Some (prev, Size) -> find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Size)) rest
-        | _ -> find_best bv simplified best rest
+        | Some (_, (Kbo | Replace | Skip)) -> find_best bv simplified (Some (irr, Size)) rest
       else if irr_sz = t_sz then match Kbo.kbo_compare sym_cmp simplified irr with
-        | 0 -> Some (irr, Skip)
+        | 0 ->
+          (match best with
+           | Some (_, Size) -> find_best bv simplified best rest
+           | _ -> Some (irr, Skip))
         | c when c > 0 ->
-          (match best with None | Some (_, Size) -> find_best bv simplified (Some (irr, Kbo)) rest
+          (match best with
+           | None -> find_best bv simplified (Some (irr, Kbo)) rest
+           | Some (_, Size) -> find_best bv simplified best rest
            | Some (prev, Kbo) -> find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Kbo)) rest
-           | _ -> find_best bv simplified best rest)
+           | Some (_, (Replace | Skip)) -> find_best bv simplified best rest)
         | _ ->
-          (match best with None | Some (_, Size) -> find_best bv simplified (Some (irr, Replace)) rest
-           | Some (prev, Kbo) | Some (prev, Replace) ->
+          (match best with
+           | None -> find_best bv simplified (Some (irr, Replace)) rest
+           | Some (_, Size) -> find_best bv simplified best rest
+           | Some (prev, (Kbo | Replace)) ->
              find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Replace)) rest
-           | _ -> find_best bv simplified best rest)
+           | Some (_, Skip) -> find_best bv simplified best rest)
       else find_best bv simplified best rest
   in let decide bv simplified = match find_best bv simplified None behaviors with
     | None -> Some (D_candidate (simplified, bv))
@@ -92,13 +101,19 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_
     | Some (irr, Kbo) -> Some (D_kbo_rule (simplified, irr))
     | Some (irr, Replace) -> Some (D_replace (irr, simplified, bv))
     | Some (_, Skip) -> Some D_skip
-  in match Hashtbl.find_opt norm_cache t with
+  in
+  Mutex.lock norm_cache_mutex;
+  let cached = Hashtbl.find_opt norm_cache t in
+  Mutex.unlock norm_cache_mutex;
+  match cached with
     | Some (simplified, size_reduced) ->
       if size_reduced then None
       else decide (Eval.behavior dom inputs simplified) simplified
     | None ->
       let simplified, size_reduced = Rewrite.normalize ~index:norm_index t in
+      Mutex.lock norm_cache_mutex;
       Hashtbl.replace norm_cache t (simplified, size_reduced);
+      Mutex.unlock norm_cache_mutex;
       if size_reduced then None
       else decide (Eval.behavior dom inputs simplified) simplified
 
@@ -116,15 +131,15 @@ let parallel_map ~num_domains f lst =
   List.concat (List.map Stdlib.Domain.join domains)
 
 let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      (decisions : ('s, 'a) term_decision list) =
+      ~inputs (decisions : ('s, 'a) term_decision list) =
   let new_size_rules = ref [] in let new_kbo_rules = ref [] in let candidates = ref [] in
   List.iter (function
     | D_size_rule rule -> rs.size_rules <- rule :: rs.size_rules; new_size_rules := rule :: !new_size_rules
     | D_kbo_rule rule  -> rs.kbo_rules  <- rule :: rs.kbo_rules;  new_kbo_rules  := rule :: !new_kbo_rules
-    | D_replace (_old_irr, new_term, stored_bv) ->
+    | D_replace (old_irr, new_term, _stored_bv) ->
       let idx = ref (-1) in
-      List.iteri (fun i (_, ei) ->
-        if !idx = -1 && list_equal dom.Domain.equal stored_bv ei then idx := i)
+      List.iteri (fun i (term, _) ->
+        if !idx = -1 && Types.term_eq dom.Domain.sym_compare term old_irr then idx := i)
         rs.behaviors;
       (match !idx with -1 -> () | i ->
         let current_irr = fst (List.nth rs.behaviors i) in
@@ -135,7 +150,7 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
         | _ ->
           let rule = (current_irr, new_term) in
           rs.kbo_rules <- rule :: rs.kbo_rules; new_kbo_rules := rule :: !new_kbo_rules;
-          let new_bv = Eval.behavior dom rs.inputs new_term in
+          let new_bv = Eval.behavior dom inputs new_term in
           rs.behaviors <- List.mapi (fun j (t', b) -> if j = i then (new_term, new_bv) else (t', b)) rs.behaviors)
     | D_skip -> ()
     | D_candidate (t, bv) -> candidates := (t, bv) :: !candidates
@@ -153,16 +168,20 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let all_inputs = inputs @ if rs.use_smt_forced then List.map (fun vars ->
     List.map (fun (v, n) -> (v, dom.Domain.int_to_val n)) vars) rs.forced_inputs
   else [] in
+  if rs.use_smt_forced then
+    rs.behaviors <- List.map (fun (irr, _) -> (irr, Eval.behavior dom all_inputs irr)) rs.behaviors;
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let use_smt = rs.use_smt && inputs = [] in
   let smt_vars = if not use_smt then [] else
     List.map Types.var_name (List.init max_vars (fun i -> i)) in
   let nd = if use_smt then 1 else num_domains in
   let decisions = parallel_map ~num_domains:nd
-    (process_term dom ~inputs:all_inputs ~norm_index ~behaviors:rs.behaviors ~norm_cache:rs.norm_cache ~use_smt ~smt_vars ~sym_cmp) enumerated in
+    (process_term dom ~inputs:all_inputs ~norm_index ~behaviors:rs.behaviors
+      ~norm_cache:rs.norm_cache ~norm_cache_mutex:rs.norm_cache_mutex
+      ~use_smt ~smt_vars ~sym_cmp) enumerated in
   let t_process = Sys.time () -. t_start -. t_enum in
   let new_kbo_rules = ref [] in let new_size_rules = ref [] in
-  let _sr, _kr, candidates = apply_decisions dom rs decisions in
+  let _sr, _kr, candidates = apply_decisions dom rs ~inputs:all_inputs decisions in
   new_size_rules := _sr; new_kbo_rules := _kr;
   let t_apply = Sys.time () -. t_start -. t_enum -. t_process in
   let new_irreducibles = ref [] in

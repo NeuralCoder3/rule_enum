@@ -31,7 +31,8 @@ let rec set_partitions ids =
 let apply_partition (part : (int * int) list) max_vars t =
   let block_count = 1 + List.fold_left (fun m (_, b) -> max m b) (-1) part in
   if block_count > max_vars then None else
-  let hole_map = Array.make 16 (-1) in
+  let max_id = List.fold_left (fun m (id, _) -> max m id) (-1) part in
+  let hole_map = Array.make (max_id + 1) (-1) in
   List.iter (fun (id, block) -> hole_map.(id) <- block) part;
   let next_var = ref 0 in let var_of_block = Hashtbl.create 8 in
   let rec go = function
