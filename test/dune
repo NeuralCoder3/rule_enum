@@ -1,3 +1,11 @@
 (test
  (name test_rule_enum)
  (libraries rule_enum))
+
+(executable
+ (name bench_rewrite)
+ (libraries rule_enum unix))
+
+(executable
+ (name diag_classes)
+ (libraries rule_enum))

@@ -211,6 +211,16 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let t_apply = Sys.time () -. t_start -. t_enum -. t_process in
   let new_irreducibles = ref [] in
   let cmp = list_compare dom.Domain.compare in
+  (* Dedupe candidates by their canonical (post-normalize) form. Different
+     enumerated terms can normalize to the same canonical term — each emits a
+     D_candidate for the same simplified, which would otherwise inflate
+     phase-2 groups and produce duplicate irreducibles. *)
+  let candidates =
+    let seen = Hashtbl.create (List.length candidates) in
+    List.filter (fun (t, _) ->
+      if Hashtbl.mem seen t then false
+      else (Hashtbl.add seen t (); true)) candidates
+  in
   let groups = group_by cmp snd candidates in
   let groups = if not rs.use_smt || rs.inputs <> [] then groups else
     let cex = ref [] in
