@@ -17,6 +17,20 @@ let distinct_vars t =
     | Node (_, args) -> List.iter collect args
   in collect t; Hashtbl.length ht
 
+let var_counts t =
+  let ht = Hashtbl.create 8 in
+  let rec go = function
+    | Var v ->
+      let c = try Hashtbl.find ht v with Not_found -> 0 in
+      Hashtbl.replace ht v (c + 1)
+    | Hole _ -> ()
+    | Node (_, args) -> List.iter go args
+  in go t; ht
+
+let var_counts_le ca cb =
+  Hashtbl.fold (fun v c acc ->
+    acc && c <= (try Hashtbl.find cb v with Not_found -> 0)) ca true
+
 let rec map_vars f = function
   | Var v -> Var (f v) | Hole n -> Hole n
   | Node (sym, args) -> Node (sym, List.map (map_vars f) args)
@@ -81,6 +95,26 @@ let match_renaming pattern target =
 let apply_renaming mapping t =
   let rec go = function
     | Var v -> Var (match assoc_opt_int v mapping with Some w -> w | None -> v)
+    | Hole _ as h -> h
+    | Node (f, args) -> Node (f, List.map go args)
+  in go t
+
+let match_subst pattern target =
+  let map = ref [] in
+  let rec go p t = match p, t with
+    | Var pv, _ ->
+      (match assoc_opt_int pv !map with
+       | Some s -> s = t
+       | None -> map := (pv, t) :: !map; true)
+    | Hole _, _ -> false
+    | Node _, (Var _ | Hole _) -> false
+    | Node (pf, pargs), Node (tf, targs) ->
+      pf = tf && List.length pargs = List.length targs && List.for_all2 go pargs targs
+  in if go pattern target then Some !map else None
+
+let apply_subst mapping t =
+  let rec go = function
+    | Var v -> (match assoc_opt_int v mapping with Some s -> s | None -> Var v)
     | Hole _ as h -> h
     | Node (f, args) -> Node (f, List.map go args)
   in go t

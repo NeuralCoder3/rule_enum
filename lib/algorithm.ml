@@ -61,6 +61,10 @@ type match_kind = Size | Kbo | Replace | Skip
 
 let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_cache ~norm_cache_mutex
       ~use_smt ~smt_vars ~sym_cmp t =
+  (* Pick the better of two same-kind candidates by Kbo.compare_total
+     (deterministic syntactic tiebreaker). Used when multiple equivalent
+     irreducibles can serve as the rule target. *)
+  let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
   let rec find_best bv simplified best = function
     | [] -> best
     | (irr, irr_bv) :: rest ->
@@ -70,31 +74,43 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs ~norm_index ~behaviors ~norm_
           | Smt.Equivalent -> true | _ -> false
       else list_equal dom.Domain.equal bv irr_bv
       in if not eq then find_best bv simplified best rest
-      else let irr_sz = Types.size irr and t_sz = Types.size simplified in
-      if irr_sz < t_sz then
-        match best with
-        | None -> find_best bv simplified (Some (irr, Size)) rest
-        | Some (prev, Size) -> find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Size)) rest
-        | Some (_, (Kbo | Replace | Skip)) -> find_best bv simplified (Some (irr, Size)) rest
-      else if irr_sz = t_sz then match Kbo.kbo_compare sym_cmp simplified irr with
-        | 0 ->
+      else
+        (* Determine the relation between irr and simplified under the
+           proof's partial KBO (var-count gated). Each branch is a candidate
+           for the "best" decision; we never form a rule unless KBO permits. *)
+        let irr_sz = Types.size irr and t_sz = Types.size simplified in
+        match Kbo.kbo sym_cmp irr simplified with
+        | Kbo.Equal ->
+          (* Structurally identical to irr. Skip unless a Size match exists. *)
           (match best with
            | Some (_, Size) -> find_best bv simplified best rest
            | _ -> Some (irr, Skip))
-        | c when c > 0 ->
+        | Kbo.Less when irr_sz < t_sz ->
+          (* irr ≺ₖ simplified and strictly smaller in size — Size rule. *)
+          (match best with
+           | None -> find_best bv simplified (Some (irr, Size)) rest
+           | Some (prev, Size) -> find_best bv simplified (Some (prefer irr prev, Size)) rest
+           | Some (_, (Kbo | Replace | Skip)) -> find_best bv simplified (Some (irr, Size)) rest)
+        | Kbo.Less ->
+          (* irr ≺ₖ simplified at the same size — KBO rule t → irr. *)
           (match best with
            | None -> find_best bv simplified (Some (irr, Kbo)) rest
            | Some (_, Size) -> find_best bv simplified best rest
-           | Some (prev, Kbo) -> find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Kbo)) rest
-           | Some (_, (Replace | Skip)) -> find_best bv simplified best rest)
-        | _ ->
+           | Some (prev, Kbo) -> find_best bv simplified (Some (prefer irr prev, Kbo)) rest
+           | Some (_, (Replace | Skip)) -> find_best bv simplified (Some (irr, Kbo)) rest)
+        | Kbo.Greater ->
+          (* simplified ≺ₖ irr — t is a better representative; replace irr. *)
           (match best with
            | None -> find_best bv simplified (Some (irr, Replace)) rest
            | Some (_, Size) -> find_best bv simplified best rest
-           | Some (prev, (Kbo | Replace)) ->
-             find_best bv simplified (Some ((if Kbo.lt sym_cmp irr prev then irr else prev), Replace)) rest
-           | Some (_, Skip) -> find_best bv simplified best rest)
-      else find_best bv simplified best rest
+           | Some (_, Kbo) -> find_best bv simplified best rest
+           | Some (prev, Replace) -> find_best bv simplified (Some (prefer irr prev, Replace)) rest
+           | Some (_, Skip) -> find_best bv simplified (Some (irr, Replace)) rest)
+        | Kbo.Incomparable ->
+          (* Equivalent in behavior but no KBO ordering — no rule possible
+             with this irr. Continue; if no other irr works either, the term
+             becomes a candidate and may be added as a separate irreducible. *)
+          find_best bv simplified best rest
   in let decide bv simplified = match find_best bv simplified None behaviors with
     | None -> Some (D_candidate (simplified, bv))
     | Some (irr, Size) -> Some (D_size_rule (simplified, irr))
@@ -143,15 +159,24 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
         rs.behaviors;
       (match !idx with -1 -> () | i ->
         let current_irr = fst (List.nth rs.behaviors i) in
-        match Kbo.kbo_compare dom.Domain.sym_compare new_term current_irr with
-        | 0 -> ()
-        | c when c > 0 ->
-          rs.kbo_rules <- (new_term, current_irr) :: rs.kbo_rules; new_kbo_rules := (new_term, current_irr) :: !new_kbo_rules
-        | _ ->
+        match Kbo.kbo dom.Domain.sym_compare new_term current_irr with
+        | Kbo.Equal -> ()
+        | Kbo.Greater ->
+          (* current_irr ≺ₖ new_term, so we can rewrite new_term to current_irr. *)
+          rs.kbo_rules <- (new_term, current_irr) :: rs.kbo_rules;
+          new_kbo_rules := (new_term, current_irr) :: !new_kbo_rules
+        | Kbo.Less ->
+          (* new_term ≺ₖ current_irr — replace and add rule current_irr → new_term. *)
           let rule = (current_irr, new_term) in
           rs.kbo_rules <- rule :: rs.kbo_rules; new_kbo_rules := rule :: !new_kbo_rules;
           let new_bv = Eval.behavior dom inputs new_term in
-          rs.behaviors <- List.mapi (fun j (t', b) -> if j = i then (new_term, new_bv) else (t', b)) rs.behaviors)
+          rs.behaviors <- List.mapi (fun j (t', b) -> if j = i then (new_term, new_bv) else (t', b)) rs.behaviors
+        | Kbo.Incomparable ->
+          (* No KBO ordering between current_irr and new_term — neither can
+             rewrite to the other. Keep both as separate canonical reps of
+             this ≈-class. *)
+          let new_bv = Eval.behavior dom inputs new_term in
+          rs.behaviors <- (new_term, new_bv) :: rs.behaviors)
     | D_skip -> ()
     | D_candidate (t, bv) -> candidates := (t, bv) :: !candidates
   ) decisions;
@@ -226,13 +251,27 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let new_irr_pairs = ref [] in
   List.iter (fun (_bv, term_pairs) ->
     let terms = List.map fst term_pairs in
-    let best = Kbo.minimum sym_cmp terms in
-    new_irreducibles := best :: !new_irreducibles;
-    new_irr_pairs := (best, _bv) :: !new_irr_pairs;
-    List.iter (fun other -> if not (Types.term_eq sym_cmp other best) then
-      (rs.kbo_rules <- (other, best) :: rs.kbo_rules; new_kbo_rules := (other, best) :: !new_kbo_rules)) terms)
+    (* KBO-minimal elements of the group: those with no strictly KBO-smaller
+       equivalent. With partial KBO, multiple terms may be mutually
+       incomparable — each becomes a separate canonical rep (matches the
+       proof's `smtMin l = l ⇒ l ∈ I_can` clause). *)
+    let minimals = List.filter (fun t ->
+      not (List.exists (fun s -> Kbo.lt sym_cmp s t) terms)) terms in
+    List.iter (fun m ->
+      new_irreducibles := m :: !new_irreducibles;
+      new_irr_pairs := (m, _bv) :: !new_irr_pairs) minimals;
+    (* Non-minimals rewrite to some KBO-strictly-smaller minimal. By KBO
+       well-foundedness on the finite group, such a minimal always exists. *)
+    List.iter (fun other ->
+      let is_min = List.exists (fun m -> Types.term_eq sym_cmp other m) minimals in
+      if not is_min then
+        match List.find_opt (fun m -> Kbo.lt sym_cmp m other) minimals with
+        | Some target ->
+          rs.kbo_rules <- (other, target) :: rs.kbo_rules;
+          new_kbo_rules := (other, target) :: !new_kbo_rules
+        | None -> ()) terms)
     groups;
-  let sorted = List.sort (fun (a,_) (b,_) -> Kbo.kbo_compare sym_cmp a b) !new_irr_pairs in
+  let sorted = List.sort (fun (a,_) (b,_) -> Kbo.compare_total sym_cmp a b) !new_irr_pairs in
   List.iter (fun (irr, bv) -> rs.behaviors <- (irr, bv) :: rs.behaviors) (List.rev sorted);
   new_irreducibles := List.map fst sorted;
   { size = n; enumerated = List.length enumerated;

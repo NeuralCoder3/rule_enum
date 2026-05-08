@@ -43,6 +43,36 @@ let test_match_renaming () =
   assert (Option.is_none (Types.match_renaming lhs2 (i_node i_plus [v 'x'; v 'y'])));
   Printf.printf "  match_renaming: OK\n"
 
+let test_match_subst () =
+  let lhs = i_node i_plus [v 'a'; v 'b'] in
+  (* Var pattern matches any term, not just variables. *)
+  let target1 = i_node i_plus [i_node i_times [v 'x'; v 'y']; v 'z'] in
+  assert (Option.is_some (Types.match_subst lhs target1));
+  (* Distinct pattern vars CAN bind to the same target term (unlike renaming). *)
+  let target2 = i_node i_plus [v 'x'; v 'x'] in
+  assert (Option.is_some (Types.match_subst lhs target2));
+  (* Repeated pattern var enforces the same binding. *)
+  let lhs2 = i_node i_plus [v 'a'; v 'a'] in
+  assert (Option.is_some (Types.match_subst lhs2 target2));
+  assert (Option.is_none (Types.match_subst lhs2 (i_node i_plus [v 'x'; v 'y'])));
+  Printf.printf "  match_subst: OK\n"
+
+let test_kbo_var_count () =
+  let cmp = Domain_int.compare_symbol in
+  (* Rule a → a+a would blow up sizes under substitution. As an oriented
+     rule it requires (a+a) ≺ₖ a, which fails by var-count gate (rhs has
+     two a's, lhs has one — var_counts_le rhs lhs is false). *)
+  let aplusa = i_node i_plus [v 'a'; v 'a'] in
+  assert (Kbo.kbo cmp aplusa (v 'a') <> Kbo.Less);
+  (* The reverse rule a+a → a is valid: a ≺ₖ a+a holds. *)
+  assert (Kbo.lt cmp (v 'a') aplusa);
+  (* Two terms with disjoint variables are KBO-incomparable
+     (var-count condition fails both ways). *)
+  let f_a = i_node i_plus [v 'a'; v 'a'] in
+  let f_b = i_node i_plus [v 'b'; v 'b'] in
+  assert (Kbo.kbo cmp f_a f_b = Kbo.Incomparable);
+  Printf.printf "  kbo var-count: OK\n"
+
 let test_rewrite () =
   let sym_str = Domain_int.string_of_symbol in
   let rules = [(i_node i_plus [v 'a'; v 'a'], v 'a')] in
@@ -117,7 +147,8 @@ let test_all_bool_inputs () =
 
 let () = Printf.printf "Running tests...\n";
   test_canonicalize (); test_distinct_vars (); test_size ();
-  test_kbo (); test_match_renaming (); test_rewrite ();
+  test_kbo (); test_match_renaming (); test_match_subst ();
+  test_kbo_var_count (); test_rewrite ();
   test_eval_int (); test_eval_bool (); test_enum_max_vars ();
   test_algorithm_int (); test_algorithm_bool (); test_size_progression ();
   test_forced_inputs (); test_all_bool_inputs ();
