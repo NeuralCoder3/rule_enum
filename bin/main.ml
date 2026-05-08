@@ -17,7 +17,10 @@ let write_iteration ?oc_header ?oc_report sym_str (s : 's Rule_enum.Algorithm.it
      flush oc | None -> ());
   (match oc_report with Some oc ->
      Printf.fprintf oc "--- Size %d (enumerated %d, %.3fs) ---\n" s.size s.enumerated s.time_total;
-     Printf.fprintf oc "  New irreducible: %d\n" nir;
+     if nir > 0 then begin
+      Printf.fprintf oc "  New irreducible: %d\n" nir;
+        List.iter (fun t -> Printf.fprintf oc "    %s\n" (Rule_enum.Types.to_string sym_str t)) s.new_irreducibles
+     end;
      if nsr > 0 then begin Printf.fprintf oc "  Size-reducing rules: %d\n" nsr;
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
          (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_size_rules end;

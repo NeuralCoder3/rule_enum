@@ -25,3 +25,16 @@ We group them by their example behavior. If there are multiple terms with the sa
 
 Next steps:
 New inputs (smt counter example) to distinguish terms.
+
+
+
+
+
+
+
+apply rule
+
+irreducibile classes
+restriction on rules
+
+smt

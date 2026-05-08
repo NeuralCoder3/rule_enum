@@ -7,3 +7,5 @@ rules_*.txt
 output/
 *.cmi 
 *.cmo
+smt_lib
+nohup.out
