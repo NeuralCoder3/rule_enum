@@ -36,7 +36,7 @@ type 'a examples = ('a Eval.input * 'a) list
 type ('s, 'a) rule_sets = {
   mutable size_rules    : 's Types.rule list;
   mutable kbo_rules     : 's Types.rule list;
-  mutable behaviors     : ('s Types.term * 'a list * 'a examples) list;
+  mutable behaviors     : ('s Types.term * 'a array * 'a examples) list;
   mutable forced_inputs : (string * int) list list;
   inputs              : 'a Eval.input list;
   use_smt             : bool;
@@ -76,9 +76,9 @@ type 's iter_summary = {
 type ('s, 'a) term_decision =
   | D_size_rule of 's Types.rule
   | D_kbo_rule  of 's Types.rule
-  | D_replace   of 's Types.term * 's Types.term * 'a list * 'a examples
+  | D_replace   of 's Types.term * 's Types.term * 'a array * 'a examples
   | D_skip
-  | D_candidate of 's Types.term * 'a list * 'a examples
+  | D_candidate of 's Types.term * 'a array * 'a examples
 
 type match_kind = Size | Kbo | Replace | Skip
 
@@ -92,16 +92,15 @@ let tier2_agrees (dom : ('s, 'a) Domain.t) t1 ex1 t2 ex2 =
   List.for_all (agree_on_one t1) ex2 &&
   List.for_all (agree_on_one t2) ex1
 
-let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs
+let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs_arr
       ~norm_index ~behaviors ~behaviors_by_bv
       ~use_smt ~smt_vars ~sym_cmp t =
   let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
-  (* equiv_irrs simplified bv returns the candidate equivalent irreducibles. *)
   let equiv_irrs simplified ex bv =
     let candidates =
-      if bv = [] then
+      if Array.length bv = 0 then
         if not use_smt then []
-        else List.filter (fun (_, irr_bv, _) -> irr_bv = []) behaviors
+        else List.filter (fun (_, irr_bv, _) -> Array.length irr_bv = 0) behaviors
       else match Hashtbl.find_opt behaviors_by_bv bv with
         | Some irrs -> irrs
         | None -> []
@@ -119,61 +118,86 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs
       | Smt.Equivalent -> true
       | _ -> false) tier2
   in
-  let rec find_best simplified best = function
-    | [] -> best
-    | (irr, _irr_bv, _irr_ex) :: rest ->
-        let irr_sz = Types.size irr and t_sz = Types.size simplified in
-        match Kbo.kbo sym_cmp irr simplified with
-        | Kbo.Equal ->
-          (match best with
-           | Some (_, Size) -> find_best simplified best rest
-           | _ -> Some (irr, Skip))
-        | Kbo.Less when irr_sz < t_sz ->
-          (match best with
-           | None -> find_best simplified (Some (irr, Size)) rest
-           | Some (prev, Size) -> find_best simplified (Some (prefer irr prev, Size)) rest
-           | Some (_, (Kbo | Replace | Skip)) -> find_best simplified (Some (irr, Size)) rest)
-        | Kbo.Less ->
-          (match best with
-           | None -> find_best simplified (Some (irr, Kbo)) rest
-           | Some (_, Size) -> find_best simplified best rest
-           | Some (prev, Kbo) -> find_best simplified (Some (prefer irr prev, Kbo)) rest
-           | Some (_, (Replace | Skip)) -> find_best simplified (Some (irr, Kbo)) rest)
-        | Kbo.Greater ->
-          (match best with
-           | None -> find_best simplified (Some (irr, Replace)) rest
-           | Some (_, Size) -> find_best simplified best rest
-           | Some (_, Kbo) -> find_best simplified best rest
-           | Some (prev, Replace) -> find_best simplified (Some (prefer irr prev, Replace)) rest
-           | Some (_, Skip) -> find_best simplified (Some (irr, Replace)) rest)
-        | Kbo.Incomparable -> find_best simplified best rest
+  let find_best simplified candidates =
+    (* Cache KBO metadata for the candidate term once. *)
+    let simp_c = Kbo.cache simplified in
+    let (_, t_sz, _) = simp_c in
+    let rec loop best = function
+      | [] -> best
+      | (irr, _irr_bv, _irr_ex) :: rest ->
+          let irr_c = Kbo.cache irr in
+          let (_, irr_sz, _) = irr_c in
+          match Kbo.kbo_cached sym_cmp irr_c simp_c with
+          | Kbo.Equal ->
+            (match best with
+             | Some (_, Size) -> loop best rest
+             | _ -> Some (irr, Skip))
+          | Kbo.Less when irr_sz < t_sz ->
+            (match best with
+             | None -> loop (Some (irr, Size)) rest
+             | Some (prev, Size) -> loop (Some (prefer irr prev, Size)) rest
+             | Some (_, (Kbo | Replace | Skip)) -> loop (Some (irr, Size)) rest)
+          | Kbo.Less ->
+            (match best with
+             | None -> loop (Some (irr, Kbo)) rest
+             | Some (_, Size) -> loop best rest
+             | Some (prev, Kbo) -> loop (Some (prefer irr prev, Kbo)) rest
+             | Some (_, (Replace | Skip)) -> loop (Some (irr, Kbo)) rest)
+          | Kbo.Greater ->
+            (match best with
+             | None -> loop (Some (irr, Replace)) rest
+             | Some (_, Size) -> loop best rest
+             | Some (_, Kbo) -> loop best rest
+             | Some (prev, Replace) -> loop (Some (prefer irr prev, Replace)) rest
+             | Some (_, Skip) -> loop (Some (irr, Replace)) rest)
+          | Kbo.Incomparable -> loop best rest
+    in loop None candidates
   in
   let decide ex bv simplified =
-    match find_best simplified None (equiv_irrs simplified ex bv) with
+    match find_best simplified (equiv_irrs simplified ex bv) with
     | None -> Some (D_candidate (simplified, bv, ex))
     | Some (irr, Size) -> Some (D_size_rule (simplified, irr))
     | Some (irr, Kbo) -> Some (D_kbo_rule (simplified, irr))
     | Some (irr, Replace) -> Some (D_replace (irr, simplified, bv, ex))
     | Some (_, Skip) -> Some D_skip
   in
-  let simplified, size_reduced = Rewrite.normalize ~sym_cmp ~index:norm_index t in
+  (* Inputs come from enumerate_terms_caps which produces canonical terms,
+     so we can use the optimized normalize that skips canonicalize when
+     no rewrite fires. *)
+  let simplified, size_reduced = Rewrite.normalize_canonical ~sym_cmp ~index:norm_index t in
   if size_reduced then None
   else
-    let bv = Eval.behavior_compiled dom compiled_inputs simplified in
-    (* Per-term examples accumulate divergent inputs (e.g., from SMT
-       counterexamples). For the common case (no SMT), they stay empty:
-       Tier 1 bv-equality already implies equivalence on the global pool,
-       and Tier 2 cross-check is trivially satisfied. We avoid the
-       O(n·inputs) make_examples allocation in the hot path. *)
+    let bv = Eval.behavior_compiled_arr dom compiled_inputs_arr simplified in
     let ex = [] in
     decide ex bv simplified
 
+(* Hashtbl-based seen set for rule dedup. Polymorphic structural equality
+   on (term, term) pairs — fine since terms have no functions. *)
+let make_rule_seen rules =
+  let h = Hashtbl.create (max 16 (2 * List.length rules)) in
+  List.iter (fun r -> Hashtbl.replace h r ()) rules;
+  h
+
 let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      ~inputs (decisions : ('s, 'a) term_decision list) =
+      ~inputs ~size_seen ~kbo_seen (decisions : ('s, 'a) term_decision list) =
   let new_size_rules = ref [] in let new_kbo_rules = ref [] in let candidates = ref [] in
+  let add_size_rule rule =
+    if not (Hashtbl.mem size_seen rule) then begin
+      Hashtbl.add size_seen rule ();
+      rs.size_rules <- rule :: rs.size_rules;
+      new_size_rules := rule :: !new_size_rules
+    end
+  in
+  let add_kbo_rule rule =
+    if not (Hashtbl.mem kbo_seen rule) then begin
+      Hashtbl.add kbo_seen rule ();
+      rs.kbo_rules <- rule :: rs.kbo_rules;
+      new_kbo_rules := rule :: !new_kbo_rules
+    end
+  in
   List.iter (function
-    | D_size_rule rule -> rs.size_rules <- rule :: rs.size_rules; new_size_rules := rule :: !new_size_rules
-    | D_kbo_rule rule  -> rs.kbo_rules  <- rule :: rs.kbo_rules;  new_kbo_rules  := rule :: !new_kbo_rules
+    | D_size_rule rule -> add_size_rule rule
+    | D_kbo_rule rule  -> add_kbo_rule rule
     | D_replace (old_irr, new_term, _stored_bv, _stored_ex) ->
       let idx = ref (-1) in
       List.iteri (fun i (term, _, _) ->
@@ -184,11 +208,10 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
         match Kbo.kbo dom.Domain.sym_compare new_term current_irr with
         | Kbo.Equal -> ()
         | Kbo.Greater ->
-          rs.kbo_rules <- (new_term, current_irr) :: rs.kbo_rules;
-          new_kbo_rules := (new_term, current_irr) :: !new_kbo_rules
+          add_kbo_rule (new_term, current_irr)
         | Kbo.Less ->
           let rule = (current_irr, new_term) in
-          rs.kbo_rules <- rule :: rs.kbo_rules; new_kbo_rules := rule :: !new_kbo_rules;
+          add_kbo_rule rule;
           let new_bv = Eval.behavior dom inputs new_term in
           rs.behaviors <- List.mapi (fun j (t', b, e) ->
             if j = i then (new_term, new_bv, []) else (t', b, e)) rs.behaviors
@@ -211,15 +234,57 @@ let build_bv_index behaviors =
 
 (* Subpass: normalize + decide on a list of enumerated terms.
    Returns (new_size_rules_added, new_kbo_rules_added, candidates). *)
+(* Parallel `List.filter_map` for the process_term loop.
+
+   process_term is pure on its inputs (norm_index, behaviors,
+   behaviors_by_bv, compiled_inputs are all built before the loop and
+   not mutated during it). Decisions are accumulated in independent
+   chunks and applied serially afterwards.
+
+   Below `parallel_threshold` items we skip the Domain.spawn overhead
+   and fall back to sequential. Worker count comes from the explicit
+   `~num_domains` argument; the env var `RULE_ENUM_JOBS` and the
+   system's recommended-domain count are used as fallbacks when callers
+   don't specify. *)
+let parallel_threshold = 1500
+
+let resolve_num_workers num_domains =
+  match num_domains with
+  | Some n when n > 0 -> n
+  | _ ->
+    match Sys.getenv_opt "RULE_ENUM_JOBS" with
+    | Some s -> (try max 1 (int_of_string s) with _ -> 1)
+    | None ->
+      try Stdlib.Domain.recommended_domain_count () with _ -> 1
+
+let parallel_filter_map ~num_domains f lst =
+  let len = List.length lst in
+  let nd = num_domains in
+  if nd <= 1 || len < parallel_threshold * 2 then List.filter_map f lst
+  else
+    let chunk_size = (len + nd - 1) / nd in
+    let rec take n acc = function
+      | [] -> (List.rev acc, [])
+      | rest when n <= 0 -> (List.rev acc, rest)
+      | x :: xs -> take (n - 1) (x :: acc) xs in
+    let rec split acc = function
+      | [] -> List.rev acc
+      | rest -> let ch, rem = take chunk_size [] rest in split (ch :: acc) rem in
+    let chunks = split [] lst in
+    let domains = List.map (fun ch ->
+      Stdlib.Domain.spawn (fun () -> List.filter_map f ch)) chunks in
+    List.concat (List.map Stdlib.Domain.join domains)
+
 let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      ~all_inputs ~compiled_inputs ~use_smt ~smt_vars ~sym_cmp enumerated =
+      ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+      ~num_domains ~use_smt ~smt_vars ~sym_cmp enumerated =
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let behaviors_by_bv = build_bv_index rs.behaviors in
-  let decisions = List.filter_map
-    (process_term dom ~inputs:all_inputs ~compiled_inputs
-       ~norm_index ~behaviors:rs.behaviors
-       ~behaviors_by_bv ~use_smt ~smt_vars ~sym_cmp) enumerated in
-  apply_decisions dom rs ~inputs:all_inputs decisions
+  let f = process_term dom ~inputs:all_inputs ~compiled_inputs_arr
+            ~norm_index ~behaviors:rs.behaviors
+            ~behaviors_by_bv ~use_smt ~smt_vars ~sym_cmp in
+  let decisions = parallel_filter_map ~num_domains f enumerated in
+  apply_decisions dom rs ~inputs:all_inputs ~size_seen ~kbo_seen decisions
 
 let profile_enabled =
   try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false
@@ -229,7 +294,7 @@ let prof_label name dt =
     Printf.eprintf "    [%s] %.3fs\n%!" name dt
 
 let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
-      (caps : Enum.caps) ~sym_cmp : 's iter_summary =
+      (caps : Enum.caps) ~num_domains ~sym_cmp : 's iter_summary =
   let t_start = Sys.time () in
   let enumerated =
     Enum.enumerate_terms_caps dom.Domain.all_symbols (irreducibles rs) n caps in
@@ -253,14 +318,18 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   (* Partition enumerated terms: var-only first, then those with Holes. *)
   let var_only, with_holes =
     List.partition (fun t -> not (Types.has_hole t)) enumerated in
-  let compiled_inputs = List.map Eval.compile all_inputs in
+  let compiled_inputs_arr = Array.of_list (List.map Eval.compile all_inputs) in
+  let size_seen = make_rule_seen rs.size_rules in
+  let kbo_seen = make_rule_seen rs.kbo_rules in
   let t_sp1 = Sys.time () in
   let sr1, kr1, cands1 = run_subpass dom rs
-    ~all_inputs ~compiled_inputs ~use_smt ~smt_vars ~sym_cmp var_only in
+    ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+    ~num_domains ~use_smt ~smt_vars ~sym_cmp var_only in
   prof_label (Printf.sprintf "subpass1 var (%d)" (List.length var_only)) (Sys.time () -. t_sp1);
   let t_sp2 = Sys.time () in
   let sr2, kr2, cands2 = run_subpass dom rs
-    ~all_inputs ~compiled_inputs ~use_smt ~smt_vars ~sym_cmp with_holes in
+    ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+    ~num_domains ~use_smt ~smt_vars ~sym_cmp with_holes in
   prof_label (Printf.sprintf "subpass2 hole (%d)" (List.length with_holes)) (Sys.time () -. t_sp2);
   let new_size_rules = ref (sr1 @ sr2) in
   let new_kbo_rules = ref (kr1 @ kr2) in
@@ -342,8 +411,12 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       if not is_min then
         match List.find_opt (fun m -> Kbo.lt_cached sym_cmp m oc) cached_min with
         | Some (target, _, _) ->
-          rs.kbo_rules <- (other, target) :: rs.kbo_rules;
-          new_kbo_rules := (other, target) :: !new_kbo_rules
+          let rule = (other, target) in
+          if not (Hashtbl.mem kbo_seen rule) then begin
+            Hashtbl.add kbo_seen rule ();
+            rs.kbo_rules <- rule :: rs.kbo_rules;
+            new_kbo_rules := rule :: !new_kbo_rules
+          end
         | None -> ()) cached)
     groups;
   prof_label (Printf.sprintf "kbo-extract (%d groups)" (List.length groups))
@@ -369,14 +442,13 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
   let mh = match max_holes with Some n -> n | None -> max_vcs in
   { max_vars = mv; max_holes = mh; max_vcs }
 
-let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domains:_
+let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   let caps = make_caps ?max_vars ?max_holes ~max_vcs () in
   let default_max = match max_size with Some m -> m | None -> 12 in
-  (* Random inputs need to cover the max possible slot count (vars + holes),
-     so we generate for the max of max_vars/max_holes/max_vcs. *)
+  let workers = resolve_num_workers num_domains in
   let slot_count = max caps.max_vars caps.max_holes |> max caps.max_vcs in
   let random_inputs =
     if num_random_inputs > 0
@@ -388,8 +460,12 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domai
   let results = ref [] in let n = ref 1 in let continue = ref true in
   while !continue && !n <= default_max do
     let summary = run_iteration dom rs !n caps
+        ~num_domains:workers
         ~sym_cmp:dom.Domain.sym_compare in
     if summary.new_size_rules = [] && summary.new_kbo_rules = [] && summary.new_irreducibles = [] then
       continue := false
     else (on_iteration summary; results := summary :: !results; incr n)
   done; (rs, List.rev !results)
+
+(* Expose resolution for callers that need to print the actual job count. *)
+let effective_num_workers = resolve_num_workers

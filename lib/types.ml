@@ -82,19 +82,40 @@ let rec map_vars f = function
 
 (* Renumber Vars and Holes each by left-to-right first occurrence, into
    separate id spaces. Vars become 0, 1, 2, …; Holes become 0, 1, 2, …
-   independently. *)
+   independently.
+
+   Hot path: called on every normalized term. Uses small stack-allocated
+   arrays (bounded by `canonicalize_max_slots`) instead of Hashtbls to
+   avoid per-call GC pressure. The arrays are -1-filled lazily; linear
+   search is fastest for ≤ 16 entries. *)
+let canonicalize_max_slots = 32
+
 let canonicalize t =
+  let vmap = Array.make canonicalize_max_slots (-1) in
+  let hmap = Array.make canonicalize_max_slots (-1) in
+  let vmap_keys = Array.make canonicalize_max_slots 0 in
+  let hmap_keys = Array.make canonicalize_max_slots 0 in
   let next_v = ref 0 and next_h = ref 0 in
-  let vmap = Hashtbl.create 16 and hmap = Hashtbl.create 16 in
+  let lookup_or_insert keys vmap next k =
+    let n = !next in
+    let i = ref 0 in
+    let found = ref (-1) in
+    while !found < 0 && !i < n do
+      if keys.(!i) = k then found := vmap.(!i);
+      incr i
+    done;
+    if !found >= 0 then !found
+    else begin
+      let id = n in
+      keys.(n) <- k;
+      vmap.(n) <- id;
+      incr next;
+      id
+    end
+  in
   let rec go = function
-    | Var v ->
-      (match Hashtbl.find_opt vmap v with
-       | Some nv -> Var nv
-       | None -> let id = !next_v in incr next_v; Hashtbl.add vmap v id; Var id)
-    | Hole n ->
-      (match Hashtbl.find_opt hmap n with
-       | Some nh -> Hole nh
-       | None -> let id = !next_h in incr next_h; Hashtbl.add hmap n id; Hole id)
+    | Var v -> Var (lookup_or_insert vmap_keys vmap next_v v)
+    | Hole h -> Hole (lookup_or_insert hmap_keys hmap next_h h)
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 

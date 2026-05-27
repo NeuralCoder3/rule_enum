@@ -102,18 +102,38 @@ let try_rewrite sym_cmp idx target =
   | Some _ as r -> r
   | None -> walk_dt ~confirm_rewrite:confirm_var idx.var_root target
 
-let rec norm_bottom ~sym_cmp ~index t = match t with
-  | Types.Var _ | Types.Hole _ -> t
+(* Returns (term, changed?). `changed=false` lets normalize skip the
+   final canonicalize pass when the term wasn't rewritten — enumerated
+   terms are already canonical. *)
+let rec norm_bottom_tracked ~sym_cmp ~index t = match t with
+  | Types.Var _ | Types.Hole _ -> (t, false)
   | Types.Node (f, args) ->
-    let args' = List.map (norm_bottom ~sym_cmp ~index) args in
+    let any_changed = ref false in
+    let args' = List.map (fun a ->
+      let (a', c) = norm_bottom_tracked ~sym_cmp ~index a in
+      if c then any_changed := true; a') args in
     let t' = Types.Node (f, args') in
     (match try_rewrite sym_cmp index t' with
-     | None -> t'
-     | Some t'' -> norm_bottom ~sym_cmp ~index t'')
+     | None -> (t', !any_changed)
+     | Some t'' ->
+       let (t''', _) = norm_bottom_tracked ~sym_cmp ~index t'' in
+       (t''', true))
+
+let norm_bottom ~sym_cmp ~index t =
+  fst (norm_bottom_tracked ~sym_cmp ~index t)
 
 let normalize ~sym_cmp ~index t =
   let sz0 = Types.size t in
   let r = Types.canonicalize (norm_bottom ~sym_cmp ~index t) in
+  (r, Types.size r < sz0)
+
+(* Hot-path variant: caller guarantees `t` is already canonical (e.g.,
+   produced by `Enum.enumerate_terms_caps`). If no rewrite fires, we
+   return the term as-is without re-walking it through canonicalize. *)
+let normalize_canonical ~sym_cmp ~index t =
+  let sz0 = Types.size t in
+  let (r, changed) = norm_bottom_tracked ~sym_cmp ~index t in
+  let r = if changed then Types.canonicalize r else r in
   (r, Types.size r < sz0)
 
 let normalize_with_index ~sym_cmp rules t = normalize ~sym_cmp ~index:(index_rules rules) t

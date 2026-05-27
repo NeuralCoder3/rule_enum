@@ -44,18 +44,23 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
   | None -> ()
 
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
-      ~max_size ~max_vcs ~max_vars ~max_holes ~domain_name
+      ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~use_smt ~use_smt_forced =
   let sym_str = dom.Rule_enum.Domain.sym_to_string in
-  Printf.printf "Domain: %s,  max VCs (k): %d,  max vars: %d,  max holes: %d,  random inputs: %d,  max size: %d,  jobs: 1 (single-threaded),  smt: %b,  smt-forced: %b\n\n%!"
-    domain_name max_vcs max_vars max_holes num_rand max_size use_smt use_smt_forced;
+  let effective_jobs =
+    Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
+  let jobs_str =
+    if effective_jobs <= 1 then "1 (single-threaded)"
+    else string_of_int effective_jobs in
+  Printf.printf "Domain: %s,  max VCs (k): %d,  max vars: %d,  max holes: %d,  random inputs: %d,  max size: %d,  jobs: %s,  smt: %b,  smt-forced: %b\n\n%!"
+    domain_name max_vcs max_vars max_holes num_rand max_size jobs_str use_smt use_smt_forced;
   let start_time = Unix.gettimeofday () in
   let oc_stats = if stats_file <> "" then Some (open_out stats_file) else None in
   let oc_report = if output_file <> "" then Some (open_out output_file) else None in
   write_header oc_stats oc_report domain_name max_vcs max_size;
   let rs, _iters =
     Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand
-      ~max_vcs ~max_vars ~max_holes
+      ~max_vcs ~max_vars ~max_holes ~num_domains:effective_jobs
       ~forced_inputs:forced ~use_smt ~use_smt_forced
       ~on_iteration:(fun s ->
         let elapsed = Unix.gettimeofday () -. start_time in
@@ -84,6 +89,8 @@ let () =
   let use_full = ref false in let max_size = ref 7 in let output_file = ref "" in
   let stats_file = ref "" in let use_smt = ref false in
   let use_smt_forced = ref false in
+  (* 0 means auto-detect (RULE_ENUM_JOBS env var, else recommended-domain-count). *)
+  let jobs = ref 0 in
   let speclist = [
     ("--domain", Arg.Set_string domain_name, " int|bool  Evaluation domain (default: int)");
     ("--max-vcs", Arg.Set_int max_vcs, " K  Sum bound: distinct vars + distinct holes (default: 3)");
@@ -93,19 +100,22 @@ let () =
     ("--random-inputs", Arg.Set_int random_inputs, " N  Random inputs, 0 = none (default: 100)");
     ("--full", Arg.Set use_full, " Exhaustive enumeration (bool: all 2^n combos)");
     ("--max-size", Arg.Set_int max_size, " N  Maximum term size (default: 7)");
+    ("--jobs", Arg.Set_int jobs, " N  Parallel worker count (default: RULE_ENUM_JOBS or all cores; 1 = single-threaded)");
     ("--output", Arg.Set_string output_file, " FILE  Write full report to FILE");
     ("--stats", Arg.Set_string stats_file, " FILE  Write per-iteration CSV to FILE");
     ("--smt", Arg.Set use_smt, " Enable SMT refinement (requires z3 in PATH)");
     ("--smt-forced", Arg.Set use_smt_forced, " Add SMT counterexamples to input set");
   ] in Arg.parse speclist (fun _ -> ()) "Usage: rule_enum [options]";
-  Random.self_init ();
+  (match Sys.getenv_opt "RULE_ENUM_SEED" with
+   | Some s -> Random.init (int_of_string s)
+   | None -> Random.self_init ());
   let num_rand = if !use_full then 0 else !random_inputs in
   let mv = if !max_vars < 0 then !max_vcs else !max_vars in
   let mh = if !max_holes < 0 then !max_vcs else !max_holes in
   match !domain_name with
   | "int" -> run_with Rule_enum.Domain_int.int_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~domain_name:"int"
+      ~num_domains:!jobs ~domain_name:"int"
       ~output_file:!output_file ~stats_file:!stats_file
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
   | "bool" ->
@@ -113,7 +123,7 @@ let () =
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
     run_with dom forced num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~domain_name:"bool"
+      ~num_domains:!jobs ~domain_name:"bool"
       ~output_file:!output_file ~stats_file:!stats_file
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
   | _ -> Printf.eprintf "Unknown domain: %s (use int or bool)\n" !domain_name; exit 1

@@ -19,7 +19,7 @@ let () =
     ~forced_inputs:forced ~max_vcs in
   let irr_count = List.length rs.Algorithm.behaviors in
   let module S = Set.Make (struct
-    type t = bool list
+    type t = bool array
     let compare = compare
   end) in
   let bvs = List.fold_left (fun acc (_, bv, _) -> S.add bv acc) S.empty rs.Algorithm.behaviors in

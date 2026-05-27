@@ -31,9 +31,20 @@ let compile (inp : 'a input) : 'a compiled =
         holes.(Char.code c - Char.code 'A') <- v) inp;
   { vars; holes }
 
+(* Arity-specialized evaluator. The vast majority of operators in our
+   domains are unary or binary, so we evaluate args directly without
+   building an intermediate List.map result list. *)
 let rec eval_compiled (dom : ('s, 'a) Domain.t) (inp : 'a compiled) = function
   | Types.Var v -> inp.vars.(v)
   | Types.Hole n -> inp.holes.(n)
+  | Types.Node (f, []) -> dom.Domain.eval_op f []
+  | Types.Node (f, [a]) ->
+    let va = eval_compiled dom inp a in
+    dom.Domain.eval_op f [va]
+  | Types.Node (f, [a; b]) ->
+    let va = eval_compiled dom inp a in
+    let vb = eval_compiled dom inp b in
+    dom.Domain.eval_op f [va; vb]
   | Types.Node (f, args) ->
     dom.Domain.eval_op f (List.map (eval_compiled dom inp) args)
 
@@ -43,15 +54,22 @@ let rec eval (dom : ('s, 'a) Domain.t) (inp : 'a input) = function
   | Types.Node (f, args) ->
     dom.Domain.eval_op f (List.map (eval dom inp) args)
 
-(* `behavior` uses precompiled inputs for hot-path speed. *)
+(* Behavior vector. Arrays let polymorphic Hashtbl hashing walk all
+   elements (lists are truncated to ~10), so bv hash keys distribute
+   better and bucket lookups are faster. *)
+type 'a bv = 'a array
+
 let behavior dom inputs t =
   let compiled = List.map compile inputs in
-  List.map (fun c -> eval_compiled dom c t) compiled
+  Array.of_list (List.map (fun c -> eval_compiled dom c t) compiled)
 
-(* Faster path that takes pre-compiled inputs (compile once outside the
-   hot loop, then reuse for each term). *)
 let behavior_compiled dom compiled t =
-  List.map (fun c -> eval_compiled dom c t) compiled
+  let arr = Array.of_list compiled in
+  Array.map (fun c -> eval_compiled dom c t) arr
+
+(* Faster: take a pre-converted array of compiled inputs. *)
+let behavior_compiled_arr dom compiled_arr t =
+  Array.map (fun c -> eval_compiled dom c t) compiled_arr
 
 let make_examples dom inputs t =
   List.map (fun inp -> (inp, eval dom inp t)) inputs

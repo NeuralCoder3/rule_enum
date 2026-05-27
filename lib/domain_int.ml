@@ -21,7 +21,8 @@ let int_domain : (symbol, int) Domain.t = {
     | _ -> failwith "bad arity for int op"
   );
   Domain.generate_inputs = (fun num_inputs k ->
-    Random.self_init ();
+    (* Caller is responsible for seeding (Random.self_init or Random.init);
+       deterministic seeds enable reproducible benchmarks. *)
     let var_names = List.init k (fun i ->
       String.make 1 (Char.chr (Char.code 'a' + i))) in
     let hole_names = List.init k (fun i ->
