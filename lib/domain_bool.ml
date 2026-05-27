@@ -21,12 +21,15 @@ let bool_domain : (symbol, bool) Domain.t = {
     | Xor, [a; b] -> a <> b
     | _ -> failwith "bad arity for bool op"
   );
-  Domain.generate_inputs = (fun num_inputs num_vars ->
+  Domain.generate_inputs = (fun num_inputs k ->
     Random.self_init ();
-    let var_names = List.init num_vars (fun i ->
+    let var_names = List.init k (fun i ->
       String.make 1 (Char.chr (Char.code 'a' + i))) in
+    let hole_names = List.init k (fun i ->
+      String.make 1 (Char.chr (Char.code 'A' + i))) in
+    let names = var_names @ hole_names in
     List.init num_inputs (fun _ ->
-      List.map (fun v -> (v, Random.bool ())) var_names)
+      List.map (fun v -> (v, Random.bool ())) names)
   );
   Domain.to_string = string_of_bool;
   Domain.equal = Bool.equal;
@@ -47,9 +50,12 @@ let bool_domain : (symbol, bool) Domain.t = {
   );
 }
 
-let all_inputs max_vars =
-  let var_names = List.init max_vars (fun i ->
+let all_inputs k =
+  let var_names = List.init k (fun i ->
     String.make 1 (Char.chr (Char.code 'a' + i))) in
+  let hole_names = List.init k (fun i ->
+    String.make 1 (Char.chr (Char.code 'A' + i))) in
+  let names = var_names @ hole_names in
   let rec go = function
     | [] -> [[]]
     | v :: vs ->
@@ -57,4 +63,4 @@ let all_inputs max_vars =
       List.concat_map (fun assigns ->
         [(v, true) :: assigns; (v, false) :: assigns]
       ) rest
-  in go var_names
+  in go names

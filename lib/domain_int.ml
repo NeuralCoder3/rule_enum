@@ -20,12 +20,15 @@ let int_domain : (symbol, int) Domain.t = {
     | UMinus, [a] -> -a
     | _ -> failwith "bad arity for int op"
   );
-  Domain.generate_inputs = (fun num_inputs num_vars ->
+  Domain.generate_inputs = (fun num_inputs k ->
     Random.self_init ();
-    let var_names = List.init num_vars (fun i ->
+    let var_names = List.init k (fun i ->
       String.make 1 (Char.chr (Char.code 'a' + i))) in
+    let hole_names = List.init k (fun i ->
+      String.make 1 (Char.chr (Char.code 'A' + i))) in
+    let names = var_names @ hole_names in
     List.init num_inputs (fun _ ->
-      List.map (fun v -> (v, Random.int 21 - 10)) var_names)
+      List.map (fun v -> (v, Random.int 21 - 10)) names)
   );
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;

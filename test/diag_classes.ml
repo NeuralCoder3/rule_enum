@@ -10,27 +10,27 @@ open Rule_enum
 
 let () =
   let dom = Domain_bool.bool_domain in
-  let max_vars = 3 in
-  let forced = Domain_bool.all_inputs max_vars in
+  let max_vcs = 3 in
+  let forced = Domain_bool.all_inputs max_vcs in
   let max_size = if Array.length Sys.argv > 1 then int_of_string Sys.argv.(1) else 8 in
-  Printf.printf "Running bool, max-vars=%d, max-size=%d, forced=%d inputs\n%!"
-    max_vars max_size (List.length forced);
+  Printf.printf "Running bool, max-vcs=%d, max-size=%d, forced=%d inputs\n%!"
+    max_vcs max_size (List.length forced);
   let rs, _ = Algorithm.run ~max_size dom ~num_random_inputs:0
-    ~forced_inputs:forced ~max_vars in
+    ~forced_inputs:forced ~max_vcs in
   let irr_count = List.length rs.Algorithm.behaviors in
   let module S = Set.Make (struct
     type t = bool list
     let compare = compare
   end) in
-  let bvs = List.fold_left (fun acc (_, bv) -> S.add bv acc) S.empty rs.Algorithm.behaviors in
+  let bvs = List.fold_left (fun acc (_, bv, _) -> S.add bv acc) S.empty rs.Algorithm.behaviors in
   let unique_bvs = S.cardinal bvs in
   Printf.printf "  irreducibles: %d\n" irr_count;
-  Printf.printf "  unique behaviors: %d (cap = 256)\n" unique_bvs;
+  Printf.printf "  unique behaviors: %d\n" unique_bvs;
   Printf.printf "  duplicates (irreducibles in multi-rep classes): %d\n"
     (irr_count - unique_bvs);
   (* For each behavior with > 1 irreducible, show how many. *)
   let by_bv = Hashtbl.create 64 in
-  List.iter (fun (irr, bv) ->
+  List.iter (fun (irr, bv, _) ->
     let lst = try Hashtbl.find by_bv bv with Not_found -> [] in
     Hashtbl.replace by_bv bv (irr :: lst)) rs.Algorithm.behaviors;
   let sym_str = Domain_bool.string_of_symbol in

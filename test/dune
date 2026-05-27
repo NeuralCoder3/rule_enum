@@ -13,3 +13,11 @@
 (executable
  (name bench_enum)
  (libraries rule_enum unix))
+
+(executable
+ (name verify_missing)
+ (libraries rule_enum))
+
+(executable
+ (name profile)
+ (libraries rule_enum))

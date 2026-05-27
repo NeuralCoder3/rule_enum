@@ -6,14 +6,14 @@ open Rule_enum
 
 let bench_size n =
   let dom = Domain_bool.bool_domain in
-  let max_vars = 3 in
-  let forced = Domain_bool.all_inputs max_vars in
+  let max_vcs = 3 in
+  let forced = Domain_bool.all_inputs max_vcs in
   let prev = if n > 1 then n - 1 else 1 in
   let rs, _ = Algorithm.run ~max_size:prev dom ~num_random_inputs:0
-    ~forced_inputs:forced ~max_vars in
+    ~forced_inputs:forced ~max_vcs in
   let irrs = Algorithm.irreducibles rs in
   let t0 = Unix.gettimeofday () in
-  let enumerated = Enum.enumerate_terms dom.Domain.all_symbols irrs n max_vars in
+  let enumerated = Enum.enumerate_terms dom.Domain.all_symbols irrs n max_vcs in
   let dt = Unix.gettimeofday () -. t0 in
   Printf.printf "Size %d: %d irrs → %d enumerated, %.4fs (%.2f µs/term)\n%!"
     n (List.length irrs) (List.length enumerated) dt

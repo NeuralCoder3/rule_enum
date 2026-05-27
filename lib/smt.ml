@@ -7,13 +7,16 @@ let solver () = Solver.mk_solver ctx None
 
 let rec encode (dom : ('s, 'a) Domain.t) vars = function
   | Types.Var v -> List.assoc (Types.var_name v) vars
-  | Types.Hole _ -> failwith "SMT: Hole"
+  | Types.Hole n -> List.assoc (Types.hole_name n) vars
   | Types.Node (f, args) ->
     dom.Domain.encode_op ctx f (List.map (encode dom vars) args)
 
-let check_equiv (dom : ('s, 'a) Domain.t) var_names t1 t2 =
+(* `slot_names` should cover every Var/Hole name that may appear in
+   either input term. With the new representation we pass both
+   var_name 0..k-1 and hole_name 0..k-1. *)
+let check_equiv (dom : ('s, 'a) Domain.t) slot_names t1 t2 =
   let decls = List.map (fun n ->
-    (n, Z3.Expr.mk_const_s ctx n (dom.Domain.smt_sort ctx))) var_names in
+    (n, Z3.Expr.mk_const_s ctx n (dom.Domain.smt_sort ctx))) slot_names in
   let vars = List.map (fun (n, e) -> (n, e)) decls in
   let diff = Boolean.mk_not ctx (Boolean.mk_eq ctx (encode dom vars t1) (encode dom vars t2)) in
   let s = solver () in Solver.add s [diff];

@@ -17,6 +17,21 @@ let distinct_vars t =
     | Node (_, args) -> List.iter collect args
   in collect t; Hashtbl.length ht
 
+let distinct_holes t =
+  let ht = Hashtbl.create 8 in
+  let rec collect = function
+    | Hole n -> Hashtbl.replace ht n ()
+    | Var _ -> ()
+    | Node (_, args) -> List.iter collect args
+  in collect t; Hashtbl.length ht
+
+let num_distinct_vcs t = distinct_vars t + distinct_holes t
+
+let rec has_hole = function
+  | Hole _ -> true
+  | Var _ -> false
+  | Node (_, args) -> List.exists has_hole args
+
 let var_counts t =
   let ht = Hashtbl.create 8 in
   let rec go = function
@@ -31,22 +46,55 @@ let var_counts_le ca cb =
   Hashtbl.fold (fun v c acc ->
     acc && c <= (try Hashtbl.find cb v with Not_found -> 0)) ca true
 
+(* Fast var-count representation: a small association list of (var_id, count)
+   sorted by var_id ascending. Pure-functional, no Hashtbl allocation.
+   Comparable in O(min(la, lb)) time. *)
+type var_counts_arr = (int * int) list
+
+let var_counts_arr t : var_counts_arr =
+  let rec collect acc = function
+    | Var v -> v :: acc
+    | Hole _ -> acc
+    | Node (_, args) -> List.fold_left collect acc args
+  in
+  let ids = List.sort_uniq compare (collect [] t) in
+  List.map (fun v ->
+    let c = ref 0 in
+    let rec count = function
+      | Var v' when v' = v -> incr c
+      | Var _ | Hole _ -> ()
+      | Node (_, args) -> List.iter count args
+    in count t; (v, !c)) ids
+
+(* Are all (v, ca[v]) ≤ (v, cb[v]) ? Both lists sorted by v. *)
+let rec var_counts_arr_le (a : var_counts_arr) (b : var_counts_arr) =
+  match a, b with
+  | [], _ -> true
+  | _ :: _, [] -> false
+  | (va, ca) :: a_rest, (vb, cb) :: b_rest ->
+    if va = vb then ca <= cb && var_counts_arr_le a_rest b_rest
+    else if va < vb then false  (* a has v that b doesn't *)
+    else var_counts_arr_le a b_rest  (* skip b's smaller v *)
+
 let rec map_vars f = function
   | Var v -> Var (f v) | Hole n -> Hole n
   | Node (sym, args) -> Node (sym, List.map (map_vars f) args)
 
+(* Renumber Vars and Holes each by left-to-right first occurrence, into
+   separate id spaces. Vars become 0, 1, 2, …; Holes become 0, 1, 2, …
+   independently. *)
 let canonicalize t =
-  let next_id = ref 0 in
-  let mapping = Hashtbl.create 16 in
+  let next_v = ref 0 and next_h = ref 0 in
+  let vmap = Hashtbl.create 16 and hmap = Hashtbl.create 16 in
   let rec go = function
     | Var v ->
-      (match Hashtbl.find_opt mapping v with
-       | Some new_v -> Var new_v
-       | None -> let id = !next_id in incr next_id; Hashtbl.add mapping v id; Var id)
+      (match Hashtbl.find_opt vmap v with
+       | Some nv -> Var nv
+       | None -> let id = !next_v in incr next_v; Hashtbl.add vmap v id; Var id)
     | Hole n ->
-      (match Hashtbl.find_opt mapping n with
-       | Some new_v -> Var new_v
-       | None -> let id = !next_id in incr next_id; Hashtbl.add mapping n id; Var id)
+      (match Hashtbl.find_opt hmap n with
+       | Some nh -> Hole nh
+       | None -> let id = !next_h in incr next_h; Hashtbl.add hmap n id; Hole id)
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 
@@ -99,6 +147,7 @@ let apply_renaming mapping t =
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 
+(* Var-only general substitution (legacy, used for hole-free LHS rules). *)
 let match_subst pattern target =
   let map = ref [] in
   let rec go p t = match p, t with
@@ -119,11 +168,71 @@ let apply_subst mapping t =
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 
-let var_name i = String.make 1 (Char.chr (Char.code 'a' + i))
+(* Combined match for rules whose LHS may contain both Var and Hole.
+
+   - `Var pv` in pattern matches any subterm (general substitution).
+   - `Hole ph` in pattern matches only a size-0 leaf in target: another
+     `Hole _` or a 0-arity `Node`. `Var _` in target does NOT match a Hole
+     in pattern (Mapping A: at rule-application time the user term is
+     ground, no Vars).
+   - Hole order preservation: as new Hole ids are discovered in the
+     pattern's left-to-right traversal, their images (in that discovery
+     order) must be strictly increasing under `term_compare sym_cmp`.
+     This realizes the proof's `Canonical` orbit-representative selector
+     — we only fire the rule in its canonical orientation.
+
+   Returns `Some (var_map, hole_map)` on success. The hole_map is in
+   discovery order, most recent first (head). *)
+let match_var_const sym_cmp pattern target =
+  let vmap = ref [] in
+  let hmap = ref [] in
+  let rec go p t = match p, t with
+    | Var pv, _ ->
+      (match assoc_opt_int pv !vmap with
+       | Some s -> term_eq sym_cmp s t
+       | None -> vmap := (pv, t) :: !vmap; true)
+    | Hole ph, target ->
+      let is_size0 = match target with
+        | Hole _ -> true
+        | Node (_, []) -> true
+        | _ -> false
+      in
+      if not is_size0 then false
+      else (match assoc_opt_int ph !hmap with
+        | Some s -> term_eq sym_cmp s target
+        | None ->
+          let ord_ok = match !hmap with
+            | [] -> true
+            | (_, prev_img) :: _ -> term_compare sym_cmp prev_img target < 0
+          in
+          if not ord_ok then false
+          else (hmap := (ph, target) :: !hmap; true))
+    | Node _, (Var _ | Hole _) -> false
+    | Node (pf, pargs), Node (tf, targs) ->
+      sym_cmp pf tf = 0 && List.length pargs = List.length targs && List.for_all2 go pargs targs
+  in if go pattern target then Some (!vmap, !hmap) else None
+
+let apply_var_const vmap hmap t =
+  let rec go = function
+    | Var v -> (match assoc_opt_int v vmap with Some s -> s | None -> Var v)
+    | Hole n -> (match assoc_opt_int n hmap with Some s -> s | None -> Hole n)
+    | Node (f, args) -> Node (f, List.map go args)
+  in go t
+
+let var_names_cache =
+  Array.init 26 (fun i -> String.make 1 (Char.chr (Char.code 'a' + i)))
+let hole_names_cache =
+  Array.init 26 (fun i -> String.make 1 (Char.chr (Char.code 'A' + i)))
+let var_name i =
+  if i >= 0 && i < 26 then var_names_cache.(i)
+  else String.make 1 (Char.chr (Char.code 'a' + i))
+let hole_name i =
+  if i >= 0 && i < 26 then hole_names_cache.(i)
+  else String.make 1 (Char.chr (Char.code 'A' + i))
 
 let rec to_string sym_str = function
   | Var v -> var_name v
-  | Hole n -> "?" ^ string_of_int n
+  | Hole n -> hole_name n
   | Node (f, [a]) when String.length (sym_str f) = 1 ->
     "(" ^ sym_str f ^ to_string sym_str a ^ ")"
   | Node (f, [a; b]) when String.length (sym_str f) = 1 ->
