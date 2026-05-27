@@ -9,3 +9,7 @@
 (executable
  (name diag_classes)
  (libraries rule_enum))
+
+(executable
+ (name bench_enum)
+ (libraries rule_enum unix))
