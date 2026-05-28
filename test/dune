@@ -21,3 +21,7 @@
 (executable
  (name profile)
  (libraries rule_enum))
+
+(executable
+ (name profile_inner)
+ (libraries rule_enum))

@@ -28,10 +28,17 @@ let rec list_compare elt_compare a b = match a, b with
 let rec list_equal eq a b = match a, b with
   | [], [] -> true | x :: xs, y :: ys -> eq x y && list_equal eq xs ys | _ -> false
 
-(* Per-term example set: list of (input-assignment, expected-value). Used
-   for Tier 2 of the equivalence check. Initially seeded from the global
-   inputs; grows when SMT/cross-eval produces new distinguishing inputs. *)
-type 'a examples = ('a Eval.input * 'a) list
+(* Per-term example cell: mutable list of (input, expected) pairs. Used
+   for Tier 2 of the equivalence check. Grows whenever SMT produces a
+   counterexample (the assignment + each term's value on it is appended
+   to BOTH involved terms' cells), or when cross-eval extends one side
+   to cover an input the other side has but it doesn't.
+
+   Stored by reference so updates propagate to every caller holding the
+   cell: candidates, post-group reps, and committed irreducibles in
+   `rs.behaviors` all share the same cell type. *)
+type 'a examples = ('a Eval.input * 'a) list ref
+let new_examples () : 'a examples = ref []
 
 type ('s, 'a) rule_sets = {
   mutable size_rules    : 's Types.rule list;
@@ -50,6 +57,75 @@ let create ~use_smt ~use_smt_forced inputs = {
 
 let irreducibles rs = List.map (fun (t, _, _) -> t) rs.behaviors
 let all_rules rs = rs.size_rules @ rs.kbo_rules
+
+(* Tier 2: cross-evaluate two terms on the union of their example inputs.
+   For inputs present in both cells, compare the stored values. For
+   inputs present in only one cell, evaluate the missing side and append.
+   Returns true iff every input in the union agrees. *)
+let tier2_cross_eval (dom : ('s, 'a) Domain.t) t1 (ex1 : 'a examples) t2 (ex2 : 'a examples) =
+  let lookup lst inp = List.find_map (fun (i, v) -> if i = inp then Some v else None) lst in
+  let agree = ref true in
+  (* For each entry in ex2: either it's also in ex1 (compare values) or
+     we evaluate t1 on it and append. *)
+  let to_add_1 = List.filter_map (fun (inp, v2) ->
+    match lookup !ex1 inp with
+    | Some v1 ->
+      if not (dom.Domain.equal v1 v2) then agree := false;
+      None
+    | None ->
+      let v1 = Eval.eval dom inp t1 in
+      if not (dom.Domain.equal v1 v2) then agree := false;
+      Some (inp, v1)) !ex2 in
+  (* For entries in ex1 not in ex2: evaluate t2 and append. Inputs in
+     both cells were already checked in the loop above. *)
+  let to_add_2 = List.filter_map (fun (inp, v1) ->
+    match lookup !ex2 inp with
+    | Some _ -> None
+    | None ->
+      let v2 = Eval.eval dom inp t2 in
+      if not (dom.Domain.equal v1 v2) then agree := false;
+      Some (inp, v2)) !ex1 in
+  ex1 := to_add_1 @ !ex1;
+  ex2 := to_add_2 @ !ex2;
+  !agree
+
+(* Counters to verify Tier 2 actually saves SMT work. *)
+let tier_calls = ref 0
+let tier2_short_circuit = ref 0
+let tier3_calls = ref 0
+let tier3_cex_added = ref 0
+
+(* Tier 3: invoke SMT after Tier 2 has confirmed cell agreement.
+   On CounterExample: convert the assignment via dom.int_to_val,
+   evaluate both terms on it, append (input, v) to BOTH cells. *)
+let tier3_smt (dom : ('s, 'a) Domain.t) ~smt_vars t1 (ex1 : 'a examples) t2 (ex2 : 'a examples) =
+  incr tier3_calls;
+  match Smt.check_equiv dom smt_vars t1 t2 with
+  | Smt.Equivalent -> true
+  | Smt.CounterExample assigns ->
+    incr tier3_cex_added;
+    (* SMT may omit assignments for vars whose value doesn't matter for
+       SAT. Pad missing names from smt_vars with 0 so eval never fails. *)
+    let padded = List.map (fun n ->
+      match List.assoc_opt n assigns with
+      | Some i -> (n, dom.Domain.int_to_val i)
+      | None -> (n, dom.Domain.int_to_val 0)) smt_vars in
+    let v1 = Eval.eval dom padded t1 in
+    let v2 = Eval.eval dom padded t2 in
+    ex1 := (padded, v1) :: !ex1;
+    ex2 := (padded, v2) :: !ex2;
+    false
+  | Smt.Unknown -> false
+
+(* Combined Tier 2 + Tier 3 check. Returns true iff t1 ≡ t2.
+   - Tier 2 (cross-eval) extends both cells and short-circuits on disagreement.
+   - Tier 3 (SMT) only fires if Tier 2 agrees; counterexamples grow both cells. *)
+let confirm_equiv ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
+  incr tier_calls;
+  if not (tier2_cross_eval dom t1 ex1 t2 ex2) then
+    (incr tier2_short_circuit; false)
+  else if not use_smt then true
+  else tier3_smt dom ~smt_vars t1 ex1 t2 ex2
 
 (* O(n) group via Hashtbl keyed by the bv. The `cmp` arg is unused — we
    rely on Hashtbl's structural hashing / equality (bv keys are
@@ -73,30 +149,33 @@ type 's iter_summary = {
   time_apply : float;  time_group : float;
 }
 
+(* A rule decision also records the candidate triple (simplified term,
+   bv, cell) and the underlying source irreducible term. SMT confirms
+   `simplified ≡ irr_src`; for var-form rules this IS the rule, for the
+   constP fallback the rule is (vars_to_holes simplified, vars_to_holes
+   irr_src) which is logically equivalent. If SMT rejects the rule
+   (random false positive), the candidate triple gets demoted to
+   D_candidate-equivalent and becomes a new irreducible. *)
 type ('s, 'a) term_decision =
-  | D_size_rule of 's Types.rule
-  | D_kbo_rule  of 's Types.rule
+  | D_size_rule of 's Types.rule * ('s Types.term * 'a array * 'a examples) * 's Types.term
+  | D_kbo_rule  of 's Types.rule * ('s Types.term * 'a array * 'a examples) * 's Types.term
   | D_replace   of 's Types.term * 's Types.term * 'a array * 'a examples
   | D_skip
   | D_candidate of 's Types.term * 'a array * 'a examples
 
 type match_kind = Size | Kbo | Replace | Skip
 
-(* Tier 2 helper. Given two terms with the same Tier-1 bv, cross-evaluate
-   on the shared and accumulated example sets. Returns true iff both
-   agree on every example known to either side. *)
-let tier2_agrees (dom : ('s, 'a) Domain.t) t1 ex1 t2 ex2 =
-  let agree_on_one t (inp, expected) =
-    dom.Domain.equal (Eval.eval dom inp t) expected
-  in
-  List.for_all (agree_on_one t1) ex2 &&
-  List.for_all (agree_on_one t2) ex1
-
+(* `equiv_irrs_anon`: like `equiv_irrs` but uses an "anon-aware" bucket
+   where each entry is `(form, primary_entry)`. The same source primary
+   can appear under multiple bv keys (its anon variants). We dedupe by
+   primary so find_best doesn't see the same source multiple times when
+   the candidate happens to share its primary bv with one of its own
+   anon-variant bvs. *)
 let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs_arr
       ~norm_index ~behaviors ~behaviors_by_bv
-      ~use_smt ~smt_vars ~sym_cmp t =
+      ~use_smt ~smt_vars:_ ~sym_cmp t =
   let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
-  let equiv_irrs simplified ex bv =
+  let equiv_irrs _simplified ex bv =
     let candidates =
       if Array.length bv = 0 then
         if not use_smt then []
@@ -105,70 +184,105 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs_arr
         | Some irrs -> irrs
         | None -> []
     in
-    (* Tier 2: cross-evaluate examples. Catches cases where bv-bucketed
-       terms agree on the global pool but diverge on per-term accumulated
-       examples (e.g., from past SMT counterexamples). *)
-    let tier2 = List.filter (fun (irr, _, irr_ex) ->
-      tier2_agrees dom simplified ex irr irr_ex) candidates
-    in
-    (* Tier 3: SMT confirmation if enabled. *)
-    if not use_smt then tier2
-    else List.filter (fun (irr, _, _) ->
-      match Smt.check_equiv dom smt_vars simplified irr with
-      | Smt.Equivalent -> true
-      | _ -> false) tier2
+    (* Tier 2 / 3 are deferred to rule-emission time (see
+       `apply_decisions` / post-group code), where we have both terms'
+       cells in scope and can mutate them. *)
+    let _ = ex in
+    candidates
+    (* Tier 3 (SMT) is deferred to rule-emission time inside
+       `apply_decisions`. Calling SMT here would mean O(candidates ×
+       bucket_size) calls — far more than needed. Instead we run SMT
+       only when a rule is about to be committed: random's bv-match is
+       a cheap prefilter, KBO determines the rule direction, then SMT
+       confirms the (LHS, RHS) pair really are equivalent. *)
   in
+  (* `find_best`:
+     For each candidate equivalent irreducible, choose the best KBO
+     decision. Var rules (general substitution) are preferred when
+     KBO orders the schemas. When var-KBO returns Incomparable, fall
+     back to the constP form (Var i → Hole i; the result is NoVar so
+     KBO is total) and, if that orders, store the *constP version* of
+     the candidate term to emit a hole rule from the var-form pair.
+
+     Returns `Some ((decision_irr, kind), constP_pair)` where
+     `constP_pair` is `Some (lhs_hole, rhs_hole)` for constP rules
+     (Kbo|Replace kind, found via the constP fallback), `None`
+     otherwise. *)
   let find_best simplified candidates =
-    (* Cache KBO metadata for the candidate term once. *)
     let simp_c = Kbo.cache simplified in
     let (_, t_sz, _) = simp_c in
-    let rec loop best = function
-      | [] -> best
+    let simp_hole = lazy (Types.canonicalize (Types.vars_to_holes simplified)) in
+    let cache_hole = lazy (Kbo.cache (Lazy.force simp_hole)) in
+    let rec loop best best_const = function
+      | [] -> (best, best_const)
       | (irr, _irr_bv, _irr_ex) :: rest ->
           let irr_c = Kbo.cache irr in
           let (_, irr_sz, _) = irr_c in
           match Kbo.kbo_cached sym_cmp irr_c simp_c with
           | Kbo.Equal ->
             (match best with
-             | Some (_, Size) -> loop best rest
-             | _ -> Some (irr, Skip))
+             | Some (_, Size) -> loop best best_const rest
+             | _ -> loop (Some (irr, Skip)) best_const rest)
           | Kbo.Less when irr_sz < t_sz ->
             (match best with
-             | None -> loop (Some (irr, Size)) rest
-             | Some (prev, Size) -> loop (Some (prefer irr prev, Size)) rest
-             | Some (_, (Kbo | Replace | Skip)) -> loop (Some (irr, Size)) rest)
+             | None -> loop (Some (irr, Size)) best_const rest
+             | Some (prev, Size) -> loop (Some (prefer irr prev, Size)) best_const rest
+             | Some (_, (Kbo | Replace | Skip)) -> loop (Some (irr, Size)) best_const rest)
           | Kbo.Less ->
             (match best with
-             | None -> loop (Some (irr, Kbo)) rest
-             | Some (_, Size) -> loop best rest
-             | Some (prev, Kbo) -> loop (Some (prefer irr prev, Kbo)) rest
-             | Some (_, (Replace | Skip)) -> loop (Some (irr, Kbo)) rest)
+             | None -> loop (Some (irr, Kbo)) best_const rest
+             | Some (_, Size) -> loop best best_const rest
+             | Some (prev, Kbo) -> loop (Some (prefer irr prev, Kbo)) best_const rest
+             | Some (_, (Replace | Skip)) -> loop (Some (irr, Kbo)) best_const rest)
           | Kbo.Greater ->
             (match best with
-             | None -> loop (Some (irr, Replace)) rest
-             | Some (_, Size) -> loop best rest
-             | Some (_, Kbo) -> loop best rest
-             | Some (prev, Replace) -> loop (Some (prefer irr prev, Replace)) rest
-             | Some (_, Skip) -> loop (Some (irr, Replace)) rest)
-          | Kbo.Incomparable -> loop best rest
-    in loop None candidates
+             | None -> loop (Some (irr, Replace)) best_const rest
+             | Some (_, Size) -> loop best best_const rest
+             | Some (_, Kbo) -> loop best best_const rest
+             | Some (prev, Replace) -> loop (Some (prefer irr prev, Replace)) best_const rest
+             | Some (_, Skip) -> loop (Some (irr, Replace)) best_const rest)
+          | Kbo.Incomparable ->
+            (* Var-KBO can't orient (var-count gate fails or distinct
+               vars at same lex position). Try the constP version: both
+               sides become NoVar, so KBO is total. *)
+            let irr_hole = Types.canonicalize (Types.vars_to_holes irr) in
+            let irr_hole_c = Kbo.cache irr_hole in
+            (match Kbo.kbo_cached sym_cmp irr_hole_c (Lazy.force cache_hole) with
+             | Kbo.Less ->
+               let candidate_pair = (Lazy.force simp_hole, irr_hole) in
+               let kind = if irr_sz < t_sz then Size else Kbo in
+               (match best_const with
+                | None -> loop best (Some (candidate_pair, kind, irr)) rest
+                | Some _ -> loop best best_const rest)
+             | _ -> loop best best_const rest)
+    in
+    let (b, bc) = loop None None candidates in
+    (b, bc)
   in
   let decide ex bv simplified =
+    let cand = (simplified, bv, ex) in
     match find_best simplified (equiv_irrs simplified ex bv) with
-    | None -> Some (D_candidate (simplified, bv, ex))
-    | Some (irr, Size) -> Some (D_size_rule (simplified, irr))
-    | Some (irr, Kbo) -> Some (D_kbo_rule (simplified, irr))
-    | Some (irr, Replace) -> Some (D_replace (irr, simplified, bv, ex))
-    | Some (_, Skip) -> Some D_skip
+    | (None, None) -> Some (D_candidate (simplified, bv, ex))
+    | (None, Some ((lhs_hole, rhs_hole), Size, irr_src)) ->
+      Some (D_size_rule ((lhs_hole, rhs_hole), cand, irr_src))
+    | (None, Some ((lhs_hole, rhs_hole), Kbo, irr_src)) ->
+      Some (D_kbo_rule ((lhs_hole, rhs_hole), cand, irr_src))
+    | (Some (irr, Size), _) -> Some (D_size_rule ((simplified, irr), cand, irr))
+    | (Some (irr, Kbo), _) -> Some (D_kbo_rule ((simplified, irr), cand, irr))
+    | (Some (irr, Replace), _) -> Some (D_replace (irr, simplified, bv, ex))
+    | (Some (_, Skip), _) -> Some D_skip
+    | (None, Some (_, (Replace | Skip), _)) ->
+      Some (D_candidate (simplified, bv, ex))
   in
-  (* Inputs come from enumerate_terms_caps which produces canonical terms,
-     so we can use the optimized normalize that skips canonicalize when
-     no rewrite fires. *)
-  let simplified, size_reduced = Rewrite.normalize_canonical ~sym_cmp ~index:norm_index t in
-  if size_reduced then None
-  else
+  (* Inputs come from enumerate_terms_caps which produces canonical
+     terms. `normalize_canonical_or_skip` short-circuits as soon as it
+     detects a strict size reduction (we'd skip the term anyway, so no
+     need to finish rewriting/canonicalize). *)
+  match Rewrite.normalize_canonical_or_skip ~sym_cmp ~index:norm_index t with
+  | None -> None  (* size reduced; term filtered out *)
+  | Some (simplified, _changed) ->
     let bv = Eval.behavior_compiled_arr dom compiled_inputs_arr simplified in
-    let ex = [] in
+    let ex = new_examples () in
     decide ex bv simplified
 
 (* Hashtbl-based seen set for rule dedup. Polymorphic structural equality
@@ -179,57 +293,106 @@ let make_rule_seen rules =
   h
 
 let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      ~inputs ~size_seen ~kbo_seen (decisions : ('s, 'a) term_decision list) =
+      ~inputs ~size_seen ~kbo_seen ~use_smt ~smt_vars
+      (decisions : ('s, 'a) term_decision list) =
   let new_size_rules = ref [] in let new_kbo_rules = ref [] in let candidates = ref [] in
-  let add_size_rule rule =
-    if not (Hashtbl.mem size_seen rule) then begin
+  (* Build a term → cell lookup so SMT counterexamples accumulate into
+     the persistent irreducible's cell instead of being discarded. *)
+  let cell_of_irr =
+    let h = Hashtbl.create (max 16 (List.length rs.behaviors)) in
+    List.iter (fun (t, _, ex) -> Hashtbl.replace h t ex) rs.behaviors;
+    fun t -> match Hashtbl.find_opt h t with
+      | Some ex -> ex
+      | None -> new_examples ()
+  in
+  (* Tier 2 cross-eval + Tier 3 SMT. Both cells get updated on every
+     SMT call (counterexample assignment + each term's value on it). *)
+  let confirms cand_ex src_lhs src_rhs =
+    let rhs_ex = cell_of_irr src_rhs in
+    confirm_equiv ~use_smt ~smt_vars dom src_lhs cand_ex src_rhs rhs_ex
+  in
+  (* If SMT rejects a rule (random false positive), the candidate is
+     demoted to a new irreducible. Without this, low-random runs would
+     silently lose many genuinely-new irreducibles. *)
+  let commit_size_rule cand rule src_lhs src_rhs =
+    let (simplified, bv, ex) = cand in
+    if Hashtbl.mem size_seen rule then ()
+    else if confirms ex src_lhs src_rhs then begin
       Hashtbl.add size_seen rule ();
       rs.size_rules <- rule :: rs.size_rules;
       new_size_rules := rule :: !new_size_rules
-    end
+    end else
+      candidates := (simplified, bv, ex) :: !candidates
   in
-  let add_kbo_rule rule =
-    if not (Hashtbl.mem kbo_seen rule) then begin
+  let commit_kbo_rule cand rule src_lhs src_rhs =
+    let (simplified, bv, ex) = cand in
+    if Hashtbl.mem kbo_seen rule then ()
+    else if confirms ex src_lhs src_rhs then begin
       Hashtbl.add kbo_seen rule ();
       rs.kbo_rules <- rule :: rs.kbo_rules;
       new_kbo_rules := rule :: !new_kbo_rules
-    end
+    end else
+      candidates := (simplified, bv, ex) :: !candidates
   in
   List.iter (function
-    | D_size_rule rule -> add_size_rule rule
-    | D_kbo_rule rule  -> add_kbo_rule rule
-    | D_replace (old_irr, new_term, _stored_bv, _stored_ex) ->
+    | D_size_rule (rule, cand, irr_src) ->
+      commit_size_rule cand rule (fst rule) irr_src
+    | D_kbo_rule (rule, cand, irr_src) ->
+      commit_kbo_rule cand rule (fst rule) irr_src
+    | D_replace (old_irr, new_term, stored_bv, ex) ->
+      let cand = (new_term, stored_bv, ex) in
       let idx = ref (-1) in
       List.iteri (fun i (term, _, _) ->
         if !idx = -1 && Types.term_eq dom.Domain.sym_compare term old_irr then idx := i)
         rs.behaviors;
       (match !idx with -1 -> () | i ->
-        let current_irr, _, _ = List.nth rs.behaviors i in
+        let current_irr, _, current_ex = List.nth rs.behaviors i in
         match Kbo.kbo dom.Domain.sym_compare new_term current_irr with
         | Kbo.Equal -> ()
         | Kbo.Greater ->
-          add_kbo_rule (new_term, current_irr)
+          commit_kbo_rule cand (new_term, current_irr) new_term current_irr
         | Kbo.Less ->
           let rule = (current_irr, new_term) in
-          add_kbo_rule rule;
+          commit_kbo_rule cand rule new_term current_irr;
           let new_bv = Eval.behavior dom inputs new_term in
+          (* new_term ≡ old_irr was SMT-confirmed inside commit_kbo_rule;
+             safe to inherit the accumulated cell. *)
           rs.behaviors <- List.mapi (fun j (t', b, e) ->
-            if j = i then (new_term, new_bv, []) else (t', b, e)) rs.behaviors
+            if j = i then (new_term, new_bv, current_ex) else (t', b, e)) rs.behaviors
         | Kbo.Incomparable ->
           let new_bv = Eval.behavior dom inputs new_term in
-          rs.behaviors <- (new_term, new_bv, []) :: rs.behaviors)
+          rs.behaviors <- (new_term, new_bv, ex) :: rs.behaviors)
     | D_skip -> ()
     | D_candidate (t, bv, ex) -> candidates := (t, bv, ex) :: !candidates
   ) decisions;
   (!new_size_rules, !new_kbo_rules, !candidates)
-
-let make_examples = Eval.make_examples
 
 let build_bv_index behaviors =
   let h = Hashtbl.create (max 16 (List.length behaviors)) in
   List.iter (fun ((_, bv, _) as entry) ->
     let bucket = try Hashtbl.find h bv with Not_found -> [] in
     Hashtbl.replace h bv (entry :: bucket)) behaviors;
+  h
+
+(* Bucket including anon variants. Each entry is `(form, source, bv, ex)`.
+   For each irreducible T, we insert (T, T, bv_T, ex) — the primary —
+   plus one entry per non-trivial anon variant T_S with its own bv_S.
+   The `source` always points back to the var-canonical irreducible
+   from which the form was derived. This lets candidates look up
+   anon-variant bvs and find equivalences across DIFFERENT source IRs
+   (the Cat A/C case). *)
+let build_bv_index_with_anons dom inputs behaviors =
+  let h = Hashtbl.create (max 16 (8 * List.length behaviors)) in
+  List.iter (fun ((t, primary_bv, _ex) as primary) ->
+    let bucket = try Hashtbl.find h primary_bv with Not_found -> [] in
+    Hashtbl.replace h primary_bv ((t, primary) :: bucket);
+    let variants = Types.anonymization_variants t in
+    List.iter (fun v ->
+      if not (Types.term_eq dom.Domain.sym_compare v t) then begin
+        let bv_v = Eval.behavior dom inputs v in
+        let bucket = try Hashtbl.find h bv_v with Not_found -> [] in
+        Hashtbl.replace h bv_v ((v, primary) :: bucket)
+      end) variants) behaviors;
   h
 
 (* Subpass: normalize + decide on a list of enumerated terms.
@@ -284,7 +447,8 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
             ~norm_index ~behaviors:rs.behaviors
             ~behaviors_by_bv ~use_smt ~smt_vars ~sym_cmp in
   let decisions = parallel_filter_map ~num_domains f enumerated in
-  apply_decisions dom rs ~inputs:all_inputs ~size_seen ~kbo_seen decisions
+  apply_decisions dom rs ~inputs:all_inputs ~size_seen ~kbo_seen
+    ~use_smt ~smt_vars decisions
 
 let profile_enabled =
   try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false
@@ -307,14 +471,25 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   if rs.use_smt_forced then
     rs.behaviors <- List.map (fun (irr, _, _) ->
       let bv = Eval.behavior dom all_inputs irr in
-      let ex = Eval.make_examples dom all_inputs irr in
+      let ex = ref (Eval.make_examples dom all_inputs irr) in
       (irr, bv, ex)) rs.behaviors;
-  let use_smt = rs.use_smt && inputs = [] in
-  let smt_vars = if not (rs.use_smt) then [] else
-    let var_names = List.init caps.max_vars Types.var_name in
-    let hole_names = List.init caps.max_holes Types.hole_name in
+  (* SMT is the Tier-3 correctness check: random-bv is Tier 1 (cheap
+     prefilter), per-term examples is Tier 2 (currently empty for the
+     fast path), SMT confirms equivalence when the cheaper tiers agree.
+     We run SMT *whenever* the user requested it, regardless of whether
+     random inputs are also present — random just prefilters which
+     candidate pairs need SMT. *)
+  let use_smt = rs.use_smt in
+  let smt_vars = if not use_smt then [] else
+    (* Declare names for BOTH var and hole IDs up to max_vcs.
+       Even with max_holes=0 in enumeration, post-group anon-form rules
+       use Hole IDs; SMT must be able to encode them. *)
+    let k = max caps.max_vars caps.max_holes |> max caps.max_vcs in
+    let var_names = List.init k Types.var_name in
+    let hole_names = List.init k Types.hole_name in
     var_names @ hole_names
   in
+  let _ = inputs in
   (* Partition enumerated terms: var-only first, then those with Holes. *)
   let var_only, with_holes =
     List.partition (fun t -> not (Types.has_hole t)) enumerated in
@@ -348,76 +523,168 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let t_group = Sys.time () in
   let groups = group_by cmp (fun (_, bv, _) -> bv) candidates in
   prof_label (Printf.sprintf "group_by (%d groups)" (List.length groups)) (Sys.time () -. t_group);
-  (* Optional SMT-driven subgrouping when SMT is enabled and inputs are empty.
-     Same machinery as before; ported to the 3-element tuple. *)
-  let groups = if not rs.use_smt || rs.inputs <> [] then groups else
-    let cex = ref [] in
-    let groups = List.concat_map (fun (bv, term_triples) ->
-      let all_terms = List.map (fun (t, _, _) -> t) term_triples in
-      match all_terms with [] -> [] | first :: rest ->
+  (* SMT-driven subgrouping: within each bv-bucket, Tier 2 (cross-eval
+     on accumulated examples) then Tier 3 (SMT) confirm which terms are
+     TRULY equivalent. Random bv may produce false-positive "equivalent"
+     groupings (different functions that happen to agree on the random
+     sample); the combined check splits these into distinct subgroups.
+     Every SMT counterexample is appended to both terms' example cells. *)
+  let groups = if not rs.use_smt then groups else
+    List.concat_map (fun (bv, term_triples) ->
+      match term_triples with [] -> [] | first :: rest ->
       let groups = ref [[first]] in
-      List.iter (fun t -> let idx = ref (-1) in
-        List.iteri (fun i g -> if !idx = -1 then
-          let rep = List.hd g in
-          (try match Smt.check_equiv dom smt_vars t rep with
-            Smt.Equivalent -> idx := i
-          |           Smt.CounterExample assigns -> if rs.use_smt_forced then cex := assigns :: !cex
-          | _ -> () with _ -> ())) !groups;
-        match !idx with -1 -> groups := [t] :: !groups
-        | i -> groups := List.mapi (fun j g -> if j = i then t :: g else g) !groups) rest;
-      List.map (fun g ->
-        (bv, List.map (fun t ->
-          let ex = make_examples dom all_inputs t in
-          (t, bv, ex)) g)) !groups) groups in
-    List.iter (fun assigns ->
-      rs.forced_inputs <- assigns :: rs.forced_inputs) !cex;
+      List.iter (fun ((t, _, t_ex) as triple) ->
+        let idx = ref (-1) in
+        List.iteri (fun i g ->
+          if !idx = -1 then
+            let (rep, _, rep_ex) = List.hd g in
+            if confirm_equiv ~use_smt ~smt_vars dom t t_ex rep rep_ex then idx := i)
+          !groups;
+        match !idx with
+        | -1 -> groups := [triple] :: !groups
+        | i -> groups := List.mapi (fun j g -> if j = i then triple :: g else g) !groups)
+        rest;
+      List.map (fun g -> (bv, g)) !groups)
     groups
   in
+  (* Cross-bv merging: cells let us cross-eval reps from different bvs
+     and only invoke SMT when Tier 2 agrees. With non-empty random inputs,
+     two truly equivalent terms agree on every random sample with
+     overwhelming probability, so cross-bv merging adds O(g²) SMT calls
+     for negligible benefit. Run only when random inputs are absent. *)
   let groups =
     if not rs.use_smt || rs.inputs <> [] then groups else
-    let cex2 = ref [] in
     let rec merge_all acc = function
       | [] -> acc | (bv, tp) :: rest ->
-        let rep, _, _ = List.hd tp in
+        let (rep, _, rep_ex) = List.hd tp in
         let same, diff = List.partition (fun (_, tp2) ->
-          let rep2, _, _ = List.hd tp2 in
-          match Smt.check_equiv dom smt_vars rep rep2 with
-            Smt.Equivalent -> true
-          | Smt.CounterExample assigns -> (if rs.use_smt_forced then cex2 := assigns :: !cex2); false
-          | _ -> false) rest in
+          let (rep2, _, rep2_ex) = List.hd tp2 in
+          confirm_equiv ~use_smt ~smt_vars dom rep rep_ex rep2 rep2_ex) rest in
         let merged = List.fold_left (fun a (_, tp2) -> a @ tp2) tp same in
         merge_all ((bv, merged) :: acc) diff
     in
-    List.iter (fun assigns -> rs.forced_inputs <- assigns :: rs.forced_inputs) !cex2;
     List.rev (merge_all [] groups)
   in
   let t_kbo_extract = Sys.time () in
   let new_irr_pairs = ref [] in
   List.iter (fun (_bv, term_triples) ->
-    (* Cache KBO metadata (size + var_counts) once per term. *)
-    let cached = List.map (fun (t, bv, ex) ->
-      (Kbo.cache t, bv, ex)) term_triples in
-    let all_c = List.map (fun (c, _, _) -> c) cached in
-    let minimals = List.filter_map (fun ((t, _, _) as c, _, _) ->
-      if not (List.exists (fun s -> Kbo.lt_cached sym_cmp s c) all_c)
-      then Some t else None) cached in
-    List.iter (fun m ->
-      let _, bv, ex = List.find (fun (t, _, _) -> Types.term_eq sym_cmp t m) term_triples in
-      new_irreducibles := m :: !new_irreducibles;
-      new_irr_pairs := (m, bv, ex) :: !new_irr_pairs) minimals;
-    let cached_min = List.map Kbo.cache minimals in
-    List.iter (fun ((other, _, _) as oc, _, _) ->
-      let is_min = List.exists (fun m -> Types.term_eq sym_cmp other m) minimals in
-      if not is_min then
-        match List.find_opt (fun m -> Kbo.lt_cached sym_cmp m oc) cached_min with
-        | Some (target, _, _) ->
-          let rule = (other, target) in
-          if not (Hashtbl.mem kbo_seen rule) then begin
-            Hashtbl.add kbo_seen rule ();
-            rs.kbo_rules <- rule :: rs.kbo_rules;
-            new_kbo_rules := rule :: !new_kbo_rules
-          end
-        | None -> ()) cached)
+    (* Compute the fully-anonymized form (vars → holes, canonicalize) of
+       each term, then expand to the hole-renaming orbit. With Hole
+       treated as a constP (linear-ordered, NOT renaming-equivalent),
+       orbit members are distinct canonical terms. For commutative ops
+       the orbit members evaluate identically (same anon-bv) — we keep
+       them, so the winner-extraction emits a commutativity rule. For
+       non-commutative ops the orbit members have distinct anon-bvs;
+       we filter them out so no spurious rule is emitted. *)
+    let with_anon = List.concat_map (fun (t, bv, ex) ->
+      let anon = Types.canonicalize (Types.vars_to_holes t) in
+      let anon_bv = Eval.behavior_compiled_arr dom compiled_inputs_arr anon in
+      let orbit = Types.hole_permutations anon in
+      List.filter_map (fun a ->
+        let a_bv =
+          if a == anon then anon_bv
+          else Eval.behavior_compiled_arr dom compiled_inputs_arr a in
+        if a_bv = anon_bv then
+          let a_c = Kbo.cache a in
+          Some (t, bv, ex, a, a_c)
+        else None) orbit)
+      term_triples
+    in
+    (* Pick the minimum under anon-form KBO; ties broken by compare_total
+       on the SOURCE terms (var-form sorts smaller than hole-form, so we
+       prefer var-canonical winners over hole-canonical when they
+       represent the same anon-form). *)
+    let winner = match with_anon with
+      | [] -> failwith "empty group"
+      | first :: rest ->
+        List.fold_left (fun acc cur ->
+          let (acc_t, _, _, _, acc_c) = acc in
+          let (cur_t, _, _, _, cur_c) = cur in
+          match Kbo.kbo_cached sym_cmp cur_c acc_c with
+          | Kbo.Less -> cur
+          | Kbo.Greater -> acc
+          | Kbo.Equal | Kbo.Incomparable ->
+            if Kbo.compare_total sym_cmp cur_t acc_t < 0 then cur else acc)
+          first rest
+    in
+    let (w_t, w_bv, w_ex, w_anon, _) = winner in
+    new_irreducibles := w_t :: !new_irreducibles;
+    new_irr_pairs := (w_t, w_bv, w_ex) :: !new_irr_pairs;
+    (* For each non-winner: emit a rule.
+       - If var-KBO orders other → winner, emit var rule.
+       - Else emit anon-form rule (other_anon → winner_anon). The anon
+         form uses Holes; thanks to match_var_const accepting Var as a
+         size-0 image, the rule still fires on var-containing targets
+         at normalize time. *)
+    let collect_holes t =
+      let h = Hashtbl.create 4 in
+      let rec go = function
+        | Types.Hole n -> Hashtbl.replace h n ()
+        | Types.Var _ -> ()
+        | Types.Node (_, args) -> List.iter go args
+      in go t;
+      Hashtbl.fold (fun k () acc -> k :: acc) h []
+    in
+    let holes_subset_le rhs lhs =
+      let lhs_holes = List.sort_uniq compare (collect_holes lhs) in
+      let rhs_holes = List.sort_uniq compare (collect_holes rhs) in
+      List.for_all (fun h -> List.mem h lhs_holes) rhs_holes
+    in
+    let var_set_le rhs lhs =
+      let lhs_vars =
+        let s = Hashtbl.create 4 in
+        let rec go = function
+          | Types.Var v -> Hashtbl.replace s v ()
+          | Types.Hole _ -> ()
+          | Types.Node (_, args) -> List.iter go args
+        in go lhs;
+        Hashtbl.fold (fun k () acc -> k :: acc) s []
+      in
+      let rhs_vars =
+        let s = Hashtbl.create 4 in
+        let rec go = function
+          | Types.Var v -> Hashtbl.replace s v ()
+          | Types.Hole _ -> ()
+          | Types.Node (_, args) -> List.iter go args
+        in go rhs;
+        Hashtbl.fold (fun k () acc -> k :: acc) s []
+      in
+      List.for_all (fun v -> List.mem v lhs_vars) rhs_vars
+    in
+    List.iter (fun (other_t, _, other_ex, other_anon, _) ->
+      (* Skip only the winner's own (source, anon) entry. Orbit expansion
+         produces multiple entries with the same source `t` but different
+         anon forms — those non-winning anons need rules emitted (this is
+         how commutativity rules surface). *)
+      let same_as_winner =
+        Types.term_eq sym_cmp other_t w_t
+        && Types.term_eq sym_cmp other_anon w_anon
+      in
+      if not same_as_winner then begin
+        let other_c = Kbo.cache other_t in
+        let w_c = Kbo.cache w_t in
+        let rule =
+          match Kbo.kbo_cached sym_cmp w_c other_c with
+          | Kbo.Less when var_set_le w_t other_t && holes_subset_le w_t other_t ->
+            Some (other_t, w_t)
+          | _ ->
+            if Types.term_eq sym_cmp other_anon w_anon then None
+            else if holes_subset_le w_anon other_anon
+                 && var_set_le w_anon other_anon
+            then Some (other_anon, w_anon)
+            else None
+        in
+        (* Tier 2 + Tier 3 on the source var-form pair (other_t, w_t).
+           If a counterexample comes back, both cells grow. *)
+        let confirms () =
+          confirm_equiv ~use_smt ~smt_vars dom other_t other_ex w_t w_ex in
+        match rule with
+        | Some r when not (Hashtbl.mem kbo_seen r) && confirms () ->
+          Hashtbl.add kbo_seen r ();
+          rs.kbo_rules <- r :: rs.kbo_rules;
+          new_kbo_rules := r :: !new_kbo_rules
+        | _ -> ()
+      end) with_anon)
     groups;
   prof_label (Printf.sprintf "kbo-extract (%d groups)" (List.length groups))
     (Sys.time () -. t_kbo_extract);

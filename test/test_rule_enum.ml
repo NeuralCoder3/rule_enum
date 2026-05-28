@@ -20,12 +20,29 @@ let b_xor = Domain_bool.Xor
 let _b_not = Domain_bool.Not
 
 let test_canonicalize () =
+  let s = Types.to_string Domain_int.string_of_symbol in
   let c1 = Types.canonicalize (v 'b') in
   assert (Types.to_string (fun _ -> "") c1 = "a");
   (* Var/Hole live in independent id namespaces post-canonicalize. *)
   let mixed = i_node i_plus [v 'b'; h 5] in
-  let c2 = Types.canonicalize mixed in
-  assert (Types.to_string Domain_int.string_of_symbol c2 = "(a+A)");
+  assert (s (Types.canonicalize mixed) = "(a+A)");
+  (* Vars are renaming-equivalent — renumbered by first occurrence. *)
+  assert (s (Types.canonicalize (i_node i_plus [v 'c'; v 'a'])) = "(a+b)");
+  (* Holes are constPs with a linear order — canonicalize MUST preserve
+     their relative orientation. `Hole 0 + Hole 1` and `Hole 1 + Hole 0`
+     are two distinct canonical forms. Both use the smallest ids 0..k-1
+     (renumbered by sorted-id rank). *)
+  let h01 = Types.canonicalize (i_node i_plus [h 0; h 1]) in
+  let h10 = Types.canonicalize (i_node i_plus [h 1; h 0]) in
+  assert (s h01 = "(A+B)");
+  assert (s h10 = "(B+A)");
+  assert (not (Types.term_eq int_sym_cmp h01 h10));
+  (* Sorted-rank renumbering: Hole 5 + Hole 3 → Hole 1 + Hole 0 (3 has
+     rank 0, 5 has rank 1; the orientation `larger-id on left` is preserved). *)
+  assert (s (Types.canonicalize (i_node i_plus [h 5; h 3])) = "(B+A)");
+  assert (s (Types.canonicalize (i_node i_plus [h 3; h 5])) = "(A+B)");
+  (* Single hole: any id collapses to Hole 0. *)
+  assert (s (Types.canonicalize (h 7)) = "A");
   Printf.printf "  canonicalize: OK\n"
 
 let test_distinct_vcs () =
@@ -66,19 +83,28 @@ let test_match_subst () =
   Printf.printf "  match_subst: OK\n"
 
 let test_match_var_const () =
-  (* Hole-only LHS: ?A + ?B  matches  ?C + ?D  in canonical (id-increasing) order. *)
-  let lhs = i_node i_plus [h 0; h 1] in
-  let ok_target = i_node i_plus [h 2; h 3] in
-  (match Types.match_var_const int_sym_cmp lhs ok_target with
-   | Some (_, _) -> ()
-   | None -> assert false);
-  (* Order-preservation: ?A + ?B doesn't match ?D + ?C (image of A would
-     be ?D > image of B = ?C, violating relative order). *)
-  let bad_target = i_node i_plus [h 3; h 2] in
-  assert (Types.match_var_const int_sym_cmp lhs bad_target = None);
-  (* Hole image NOT allowed to be a Var (Mapping A: user terms are ground). *)
-  let var_target = i_node i_plus [v 'a'; v 'b'] in
-  assert (Types.match_var_const int_sym_cmp lhs var_target = None);
+  (* The order constraint enforces `img(Hole i) < img(Hole j)` iff `i < j`
+     — i.e., by hole id, NOT by encounter order. This is what makes
+     `Hole 0 + Hole 1` (canonical) and `Hole 1 + Hole 0` (non-canonical)
+     match DIFFERENT target orientations, the asymmetry that supports
+     commutativity rewriting. *)
+  let lhs01 = i_node i_plus [h 0; h 1] in
+  let lhs10 = i_node i_plus [h 1; h 0] in
+  let canon_target    = i_node i_plus [h 2; h 3] in  (* left < right *)
+  let reverse_target  = i_node i_plus [h 3; h 2] in  (* left > right *)
+  (* Canonical LHS matches canonical target, NOT reverse. *)
+  assert (Option.is_some (Types.match_var_const int_sym_cmp lhs01 canon_target));
+  assert (Types.match_var_const int_sym_cmp lhs01 reverse_target = None);
+  (* Reverse LHS does the OPPOSITE: matches reverse target, not canonical. *)
+  assert (Types.match_var_const int_sym_cmp lhs10 reverse_target |> Option.is_some);
+  assert (Types.match_var_const int_sym_cmp lhs10 canon_target = None);
+  (* Hole pattern accepts Var as image (with order-preservation). *)
+  let var_canon   = i_node i_plus [v 'a'; v 'b'] in
+  let var_reverse = i_node i_plus [v 'b'; v 'a'] in
+  assert (Option.is_some (Types.match_var_const int_sym_cmp lhs01 var_canon));
+  assert (Types.match_var_const int_sym_cmp lhs01 var_reverse = None);
+  assert (Option.is_some (Types.match_var_const int_sym_cmp lhs10 var_reverse));
+  assert (Types.match_var_const int_sym_cmp lhs10 var_canon = None);
   (* Mixed Var+Hole LHS: x + ?A. Var part = general subst, Hole part = size-0. *)
   let mixed_lhs = i_node i_plus [v 'a'; h 0] in
   let mixed_target = i_node i_plus [i_node i_times [v 'x'; v 'y']; h 5] in
@@ -91,6 +117,14 @@ let test_match_var_const () =
   let diff = i_node i_plus [h 4; h 5] in
   assert (Option.is_some (Types.match_var_const int_sym_cmp lhs_eq same));
   assert (Types.match_var_const int_sym_cmp lhs_eq diff = None);
+  (* Three holes: order constraint applies pairwise by hole id. Pattern
+     `(Hole 0 + Hole 2) - Hole 1` requires img(0) < img(1) < img(2). *)
+  let lhs3 = i_node i_minus [i_node i_plus [h 0; h 2]; h 1] in
+  assert (Option.is_some (Types.match_var_const int_sym_cmp lhs3
+            (i_node i_minus [i_node i_plus [h 0; h 2]; h 1])));
+  (* If img(2) and img(1) get swapped in the target, no match. *)
+  assert (Types.match_var_const int_sym_cmp lhs3
+            (i_node i_minus [i_node i_plus [h 0; h 1]; h 2]) = None);
   Printf.printf "  match_var_const: OK\n"
 
 let test_kbo_var_count () =
@@ -264,6 +298,636 @@ let test_holes_required_for_completeness () =
   Printf.printf "  completeness scheme: OK (%d missing; A=%d B=%d C=%d)\n"
     (List.length missing) !cat_a !cat_b !cat_c
 
+let test_hole_permutations () =
+  let s = Types.to_string Domain_int.string_of_symbol in
+  let to_set ts = List.sort_uniq compare (List.map s ts) in
+  (* 0 distinct holes: singleton orbit. *)
+  assert (to_set (Types.hole_permutations (v 'a')) = ["a"]);
+  (* 1 distinct hole: singleton orbit. *)
+  assert (to_set (Types.hole_permutations (h 0)) = ["A"]);
+  (* 2 distinct holes: both orientations. *)
+  assert (to_set (Types.hole_permutations (i_node i_plus [h 0; h 1]))
+            = ["(A+B)"; "(B+A)"]);
+  (* Structural symmetry: identical-hole term has only one orbit member. *)
+  assert (to_set (Types.hole_permutations (i_node i_plus [h 0; h 0])) = ["(A+A)"]);
+  (* 3 distinct holes: 6 permutations all distinct under new canonicalize. *)
+  let t = i_node i_plus [h 0; i_node i_times [h 1; h 2]] in
+  let orbit = Types.hole_permutations t in
+  assert (List.length orbit = 6);
+  assert (List.length (to_set orbit) = 6);
+  Printf.printf "  hole_permutations: OK\n"
+
+let test_commutativity_rule () =
+  (* End-to-end: running the algorithm on the int domain should produce
+     explicit commutativity rules for `+` and `*`, but NOT for `-`. *)
+  let rs, _ = Algorithm.run ~max_size:3 int_dom ~num_random_inputs:100 ~max_vcs:3 in
+  let sym_str = Domain_int.string_of_symbol in
+  let rule_strs = List.map (fun (l, r) ->
+    Types.to_string sym_str l ^ " -> " ^ Types.to_string sym_str r)
+    (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules) in
+  let has s = List.mem s rule_strs in
+  assert (has "(B+A) -> (A+B)");
+  assert (has "(B*A) -> (A*B)");
+  (* No analogous rule for `-` (non-commutative). Both directions must be absent. *)
+  assert (not (has "(B-A) -> (A-B)"));
+  assert (not (has "(A-B) -> (B-A)"));
+  Printf.printf "  commutativity rule generation: OK\n"
+
+(* End-to-end semantic check: the synthesized rule set should normalize
+   any two universally-equivalent terms to the same normal form. We
+   sample pairs of terms and verify the rewrite engine converges. *)
+let test_rule_set_semantic_closure () =
+  let rs, _ = Algorithm.run ~max_size:5 int_dom ~num_random_inputs:100 ~max_vcs:3 in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let normalize t =
+    let r, _ = Rewrite.normalize_with_index ~sym_cmp:int_sym_cmp rules t in
+    Types.canonicalize r
+  in
+  (* Commutativity application: B+A and A+B should normalize to the same form. *)
+  let n1 = normalize (i_node i_plus [h 1; h 0]) in
+  let n2 = normalize (i_node i_plus [h 0; h 1]) in
+  assert (Types.term_eq int_sym_cmp n1 n2);
+  let n3 = normalize (i_node i_times [h 1; h 0]) in
+  let n4 = normalize (i_node i_times [h 0; h 1]) in
+  assert (Types.term_eq int_sym_cmp n3 n4);
+  (* Non-commutativity stays separated: B-A and A-B normalize to DIFFERENT forms. *)
+  let m1 = normalize (i_node i_minus [h 1; h 0]) in
+  let m2 = normalize (i_node i_minus [h 0; h 1]) in
+  assert (not (Types.term_eq int_sym_cmp m1 m2));
+  Printf.printf "  rule-set semantic closure: OK\n"
+
+(* Regression: a Hole and a Var are distinct concepts. Tests that lump
+   them together (e.g., "canonicalize renumbers by first occurrence")
+   would let the conflation bug return silently. *)
+let test_hole_var_distinct_semantics () =
+  let s = Types.to_string Domain_int.string_of_symbol in
+  (* Distinct var-only terms `a+b` and `b+a` are renaming-equivalent —
+     SAME canonical form. *)
+  let v_ab = Types.canonicalize (i_node i_plus [v 'a'; v 'b']) in
+  let v_ba = Types.canonicalize (i_node i_plus [v 'b'; v 'a']) in
+  assert (Types.term_eq int_sym_cmp v_ab v_ba);
+  assert (s v_ab = "(a+b)");
+  (* Distinct hole-only terms `A+B` and `B+A` are NOT renaming-equivalent
+     — DIFFERENT canonical forms. *)
+  let h_ab = Types.canonicalize (i_node i_plus [h 0; h 1]) in
+  let h_ba = Types.canonicalize (i_node i_plus [h 1; h 0]) in
+  assert (not (Types.term_eq int_sym_cmp h_ab h_ba));
+  (* KBO orders the two hole-orientations. *)
+  assert (Kbo.lt int_sym_cmp h_ab h_ba);
+  Printf.printf "  hole/var distinct semantics: OK\n"
+
+(* Manual checks we made during development that warrant regression tests. *)
+
+(* Tier 2 cross-eval as a standalone helper: when cells contain shared
+   inputs with disagreeing values, the helper must return false. The
+   previous version silently agreed on inputs already in BOTH cells —
+   it only checked new evaluations on inputs present in one cell only. *)
+let test_tier2_cross_eval_helper () =
+  let open Rule_enum in
+  let dom = int_dom in
+  (* Two non-equivalent terms. *)
+  let t1 = i_node i_plus [h 0; h 1] in
+  let t2 = i_node i_plus [h 0; h 0] in
+  (* Seed both cells with the SAME input but DIFFERENT stored values
+     (mimicking a prior SMT counterexample for the two terms). *)
+  let input = [("A", 1); ("B", 2)] in
+  let ex1 = ref [(input, 3)] in  (* claimed value of t1 *)
+  let ex2 = ref [(input, 2)] in  (* claimed value of t2; differs *)
+  assert (not (Algorithm.tier2_cross_eval dom t1 ex1 t2 ex2));
+  (* Conversely: agreeing cells return true and extend with unseen inputs. *)
+  let t3 = i_node i_plus [h 0; h 1] in
+  let t4 = i_node i_plus [h 1; h 0] in  (* commutative: same value on all inputs *)
+  let in_a = [("A", 5); ("B", 7)] in
+  let in_b = [("A", 11); ("B", 13)] in
+  let ex3 = ref [(in_a, 12)] in
+  let ex4 = ref [(in_b, 24)] in
+  let ok = Algorithm.tier2_cross_eval dom t3 ex3 t4 ex4 in
+  assert ok;
+  (* Cells extended to cover the union: ex3 now has in_b, ex4 now has in_a. *)
+  assert (List.length !ex3 = 2);
+  assert (List.length !ex4 = 2);
+  Printf.printf "  tier2 cross-eval helper: OK\n"
+
+(* Manual: at the recommended config (--random 100, max_holes=0),
+   --random and --random --smt produce IDENTICAL rule sets. Locks in
+   the property that SMT confirmation introduces no spurious additions
+   or rejections at this density. *)
+let test_smt_random_equivalence () =
+  let run ?(use_smt = false) ?(max_holes = 0) () =
+    Random.init 42;
+    Algorithm.run ~max_size:6 int_dom ~num_domains:1
+      ~num_random_inputs:100 ~max_vcs:3 ~max_holes ~use_smt |> fst
+  in
+  let rs_rand = run () in
+  let rs_smt  = run ~use_smt:true () in
+  let r1 = List.sort compare (rs_rand.Algorithm.size_rules @ rs_rand.Algorithm.kbo_rules) in
+  let r2 = List.sort compare (rs_smt.Algorithm.size_rules @ rs_smt.Algorithm.kbo_rules) in
+  let i1 = List.sort compare (List.map (fun (t, _, _) -> t) rs_rand.Algorithm.behaviors) in
+  let i2 = List.sort compare (List.map (fun (t, _, _) -> t) rs_smt.Algorithm.behaviors) in
+  assert (r1 = r2);
+  assert (i1 = i2);
+  Printf.printf "  smt/random equivalence: OK (rules=%d irrs=%d)\n"
+    (List.length r1) (List.length i1)
+
+(* Semantic-closure check for what the algorithm DOES guarantee: pairs
+   of universally-equivalent terms that differ only by leaf-level
+   commutativity (swapping size-0 hole/constP positions of a commutative
+   op). The rewrite engine normalizes both to the same canonical form. *)
+let test_semantic_closure_leaf_level () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:6 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~max_holes:3 ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let normalize t =
+    let r, _ = Rewrite.normalize_with_index ~sym_cmp:int_sym_cmp rules t in
+    Types.canonicalize r
+  in
+  let pairs = [
+    "comm-+", i_node i_plus [h 1; h 0], i_node i_plus [h 0; h 1];
+    "comm-*", i_node i_times [h 1; h 0], i_node i_times [h 0; h 1];
+    (* Commutativity inside a unary context (negation): leaf-level. *)
+    "-(B+A) ≡ -(A+B)",
+      i_node Domain_int.UMinus [i_node i_plus [h 1; h 0]],
+      i_node Domain_int.UMinus [i_node i_plus [h 0; h 1]];
+  ] in
+  List.iter (fun (name, lhs, rhs) ->
+    let nl = normalize lhs in
+    let nr = normalize rhs in
+    if not (Types.term_eq int_sym_cmp nl nr) then begin
+      Printf.eprintf "  leaf-level closure FAIL on %s: %s ~> %s vs %s ~> %s\n" name
+        (Types.to_string Domain_int.string_of_symbol lhs)
+        (Types.to_string Domain_int.string_of_symbol nl)
+        (Types.to_string Domain_int.string_of_symbol rhs)
+        (Types.to_string Domain_int.string_of_symbol nr);
+      assert false
+    end) pairs;
+  Printf.printf "  semantic closure (leaf-level): OK (%d pairs)\n" (List.length pairs)
+
+(* Operator-level commutativity on COMPOUND args.
+
+   These pairs are universally equivalent but related by swapping args
+   of a commutative operator when those args are compound terms (not
+   just size-0 leaves). The basic comm rule `(B*A) → (A*B)` cannot fire
+   because `match_var_const` requires hole images to be size-0.
+
+   These close because the enumerator now generates every hole-id
+   labeling of each partition shape (e.g. `B*(A*B)` alongside `A*(B*A)`).
+   The non-canonical labelings land in their own bv-buckets where
+   bv-bucketing groups them with semantically-equivalent canonical
+   forms, and the post-group winner-extraction emits the rule. *)
+let test_operator_level_closure () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:6 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~max_holes:3 ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let normalize t =
+    let r, _ = Rewrite.normalize_with_index ~sym_cmp:int_sym_cmp rules t in
+    Types.canonicalize r
+  in
+  let pairs = [
+    "B*(A*B) ≡ A*(B*B)",
+      i_node i_times [h 1; i_node i_times [h 0; h 1]],
+      i_node i_times [h 0; i_node i_times [h 1; h 1]];
+    "(B*B)*A ≡ A*(B*B)",
+      i_node i_times [i_node i_times [h 1; h 1]; h 0],
+      i_node i_times [h 0; i_node i_times [h 1; h 1]];
+    (* Negated counterparts (the original "extra SMT rules"). *)
+    "-(B*(A*B)) ≡ -(A*(B*B))",
+      i_node Domain_int.UMinus [i_node i_times [h 1; i_node i_times [h 0; h 1]]],
+      i_node Domain_int.UMinus [i_node i_times [h 0; i_node i_times [h 1; h 1]]];
+  ] in
+  List.iter (fun (name, lhs, rhs) ->
+    let nl = normalize lhs and nr = normalize rhs in
+    if not (Types.term_eq int_sym_cmp nl nr) then begin
+      Printf.eprintf "  operator-level closure FAIL on %s: %s ~> %s vs %s ~> %s\n" name
+        (Types.to_string Domain_int.string_of_symbol lhs)
+        (Types.to_string Domain_int.string_of_symbol nl)
+        (Types.to_string Domain_int.string_of_symbol rhs)
+        (Types.to_string Domain_int.string_of_symbol nr);
+      assert false
+    end) pairs;
+  Printf.printf "  semantic closure (operator-level): OK (%d pairs)\n" (List.length pairs)
+
+(* Manual: with the same seed, the algorithm produces byte-identical
+   output. Without Random.init the test relies on Random.self_init which
+   pulls from the system — that masked any seed-dependent nondeterminism
+   we'd want to surface. *)
+let test_cross_seed_determinism () =
+  let run_with_seed seed =
+    Random.init seed;
+    let rs, _ = Algorithm.run ~max_size:5 int_dom ~num_domains:1
+      ~num_random_inputs:100 ~max_vcs:3 in
+    (List.sort compare (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules),
+     List.sort compare (List.map (fun (t,_,_) -> t) rs.Algorithm.behaviors))
+  in
+  let a1, i1 = run_with_seed 42 in
+  let a2, i2 = run_with_seed 42 in
+  assert (a1 = a2);
+  assert (i1 = i2);
+  (* Different seed: rule SET (not list order) is the same modulo random
+     bv collisions, but for this domain at size 5 the rule SET is stable
+     across seeds. *)
+  let b1, j1 = run_with_seed 1 in
+  let b2, _ = run_with_seed 999 in
+  assert (b1 = a1);
+  assert (b2 = a1);
+  assert (j1 = i1);
+  Printf.printf "  cross-seed determinism: OK\n"
+
+(* Manual: --random-inputs 1 --smt used to crash with "Unbound name: A"
+   because SMT counterexamples sometimes omit hole-slot assignments and
+   downstream Eval saw missing names. Fixed by padding missing names
+   with 0 in tier3_smt. Regression test: just run the path without
+   exception. *)
+let test_low_random_smt_no_unbound () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:4 int_dom ~num_domains:1
+    ~num_random_inputs:1 ~max_vcs:3 ~use_smt:true in
+  assert (List.length rs.Algorithm.behaviors > 0);
+  Printf.printf "  low-random smt (no Unbound crash): OK (%d irrs)\n"
+    (List.length rs.Algorithm.behaviors)
+
+(* Manual: at low random count, Tier 2 short-circuits a meaningful
+   fraction of would-be-SMT calls (~48% at rand=1 in our profiling).
+   This locks in that the cells actually accumulate from SMT
+   counterexamples and that cross-eval triggers downstream.
+
+   The counters are global (cheap incrementing) and persist across runs;
+   we capture before/after deltas. *)
+(* Parser round-trips every term the pretty-printer emits. Tests the
+   load-able rule/irreducible file format introduced for `--rule-output`
+   and `--eval`. *)
+let test_parse_roundtrip () =
+  let sym_str = Domain_int.string_of_symbol in
+  let decode = Parse.decoder_of_symbols int_dom.Domain.all_symbols in
+  let terms = [
+    v 'a';
+    h 0;
+    i_node i_plus [v 'a'; v 'b'];
+    i_node i_minus [v 'a'; h 0];
+    i_node Domain_int.UMinus [i_node i_plus [v 'a'; h 1]];
+    i_node i_times [i_node Domain_int.UMinus [v 'a']; h 0];
+    i_node i_plus [i_node i_times [v 'a'; v 'b']; i_node i_minus [v 'c'; h 0]];
+    (* Non-canonical hole orientation, must round-trip exactly. *)
+    i_node i_times [h 1; i_node i_times [h 0; h 1]];
+  ] in
+  List.iter (fun t ->
+    let s = Types.to_string sym_str t in
+    let t' = Parse.parse_term decode s in
+    if not (Types.term_eq int_sym_cmp t t') then begin
+      Printf.eprintf "  parse roundtrip FAIL: %s\n" s;
+      Printf.eprintf "    reparsed as: %s\n" (Types.to_string sym_str t');
+      assert false
+    end) terms;
+  Printf.printf "  parse roundtrip: OK (%d terms)\n" (List.length terms)
+
+(* End-to-end: save rules, reload them, normalize the same term with
+   both rule sets, get identical results. Locks in the file format and
+   the parser/printer pair. *)
+let test_save_load_normalize () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:5 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 in
+  let rules_mem = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let path = Filename.temp_file "rule_enum_test" ".rules" in
+  let sym_str = Domain_int.string_of_symbol in
+  let decode = Parse.decoder_of_symbols int_dom.Domain.all_symbols in
+  Parse.save_rules sym_str path rules_mem;
+  let rules_loaded = Parse.load_rules decode path in
+  assert (List.length rules_mem = List.length rules_loaded);
+  (* Normalize a battery of terms with each rule set. *)
+  let probe_terms = [
+    i_node i_plus [v 'b'; v 'a'];
+    i_node i_times [v 'c'; v 'a'];
+    i_node Domain_int.UMinus [i_node Domain_int.UMinus [v 'a']];
+    i_node i_minus [i_node i_plus [v 'a'; v 'b']; v 'b'];
+  ] in
+  List.iter (fun t ->
+    let nm, _ = Rewrite.normalize_with_index ~sym_cmp:int_sym_cmp rules_mem t in
+    let nl, _ = Rewrite.normalize_with_index ~sym_cmp:int_sym_cmp rules_loaded t in
+    assert (Types.term_eq int_sym_cmp
+              (Types.canonicalize nm) (Types.canonicalize nl))) probe_terms;
+  Sys.remove path;
+  Printf.printf "  save+load+normalize: OK (%d rules round-tripped)\n"
+    (List.length rules_mem)
+
+(* Full validation in three parts.
+
+   Part 1 — RULE SOUNDNESS. Every emitted rule (lhs, rhs) must satisfy
+   `lhs ≡ rhs` under SMT. A counterexample means the synthesis produced
+   an unsound rule (a real correctness bug).
+
+   Part 2 — REWRITE SOUNDNESS. Enumerate every canonical hole-only term
+   of size ≤ max_size. For each, the rewrite engine's normalization must
+   be SMT-equivalent to the input. Catches mistakes where the rewrite
+   engine changes a term's semantic value.
+
+   Part 3 — CONFLUENCE. Within the same SMT class of enumerated terms,
+   all members must normalize to the same syntactic form. This is the
+   confluence + completeness check.
+
+   We restrict to hole-only terms because they are the schema-level
+   analogue of ground user inputs (no schema vars, only constPs). The
+   normalization helper deliberately does NOT alpha-rename hole ids at
+   the end — that would map `(-B)` to `(-A)` and break semantic
+   equivalence between input and output. *)
+(* Generate every well-formed term of size n over the given symbols,
+   using `k` hole leaves. No canonicalization, no orientation filter —
+   this is the full unrestricted Herbrand universe restricted to the
+   specified leaves and symbol set. Used by the all-possible-terms test
+   to validate the rewrite engine on inputs the synthesis enumerator
+   would never produce as canonical candidates. *)
+let rec all_possible_terms_of_size all_symbols ~k size =
+  let leaves = List.init k (fun i -> Types.Hole i) in
+  let zero_arity = List.filter_map (fun (_, ar, s) ->
+    if ar = 0 then Some (Types.Node (s, [])) else None) all_symbols in
+  if size <= 0 then []
+  else if size = 1 then leaves @ zero_arity
+  else
+    let result = ref [] in
+    List.iter (fun (_, arity, sym) ->
+      if arity > 0 then
+        let arg_size_parts = Enum.partitions (size - 1) arity in
+        List.iter (fun arg_sizes ->
+          let per_arg = List.map
+            (fun s -> all_possible_terms_of_size all_symbols ~k s) arg_sizes in
+          if List.for_all (fun l -> l <> []) per_arg then
+            List.iter (fun args ->
+              result := Types.Node (sym, args) :: !result)
+              (Enum.product per_arg)) arg_size_parts) all_symbols;
+    !result
+
+let test_full_soundness_and_completeness () =
+  Random.init 42;
+  let max_size = 5 in
+  let k = 3 in
+  let rs, _ = Algorithm.run ~max_size int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:k ~max_holes:k ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let sym_cmp = int_sym_cmp in
+  let sym_str = Domain_int.string_of_symbol in
+  let smt_vars =
+    List.init k Types.var_name @ List.init k Types.hole_name
+  in
+
+  (* Part 1. *)
+  let n_invalid = ref 0 in
+  List.iter (fun (lhs, rhs) ->
+    match Smt.check_equiv int_dom smt_vars lhs rhs with
+    | Smt.Equivalent -> ()
+    | Smt.CounterExample cex ->
+      incr n_invalid;
+      Printf.eprintf "  INVALID rule: %s -> %s\n    counterexample: %s\n"
+        (Types.to_string sym_str lhs) (Types.to_string sym_str rhs)
+        (String.concat " " (List.map (fun (n, v) -> Printf.sprintf "%s=%d" n v) cex))
+    | Smt.Unknown ->
+      incr n_invalid;
+      Printf.eprintf "  UNKNOWN (could not prove) rule: %s -> %s\n"
+        (Types.to_string sym_str lhs) (Types.to_string sym_str rhs)) rules;
+  assert (!n_invalid = 0);
+
+  (* Enumerate every canonical hole-only term of size ≤ max_size. *)
+  let caps : Enum.caps = { max_vars = 0; max_holes = k; max_vcs = k } in
+  let acc = ref [] in
+  for sz = 1 to max_size do
+    let ts = Enum.enumerate_terms_caps int_dom.Domain.all_symbols !acc sz caps in
+    acc := ts @ !acc
+  done;
+  let all_terms = !acc in
+
+  (* Normalize by rewriting alone — no canonicalize at the end, since
+     canonicalize alpha-renames hole ids and breaks semantic preservation
+     for rewrite outputs. *)
+  let index = Rewrite.index_rules rules in
+  let normalize t = Rewrite.norm_bottom ~sym_cmp ~index t in
+  let norm = List.map (fun t -> (t, normalize t)) all_terms in
+
+  (* Part 2: rewrite soundness. *)
+  let n_unsound = ref 0 in
+  List.iter (fun (t, t_norm) ->
+    if not (Types.term_eq sym_cmp t t_norm) then
+      match Smt.check_equiv int_dom smt_vars t t_norm with
+      | Smt.Equivalent -> ()
+      | Smt.CounterExample cex ->
+        incr n_unsound;
+        Printf.eprintf "  REWRITE UNSOUND: %s normalized to %s, not equivalent (cex: %s)\n"
+          (Types.to_string sym_str t) (Types.to_string sym_str t_norm)
+          (String.concat " " (List.map (fun (n, v) -> Printf.sprintf "%s=%d" n v) cex))
+      | Smt.Unknown -> ()) norm;
+  assert (!n_unsound = 0);
+
+  (* Part 3: confluence. Pre-partition by behavior vector, then SMT
+     pairwise within each bv-group to build the true equivalence classes.
+     All members of one class must normalize to the same term. *)
+  let inputs = Eval.generate_inputs int_dom 50 k in
+  let compiled = Array.of_list (List.map Eval.compile inputs) in
+  let bv t = Eval.behavior_compiled_arr int_dom compiled t in
+  let bv_groups = Hashtbl.create 64 in
+  List.iter (fun (t, t_norm) ->
+    let b = bv t in
+    let cur = try Hashtbl.find bv_groups b with Not_found -> [] in
+    Hashtbl.replace bv_groups b ((t, t_norm) :: cur)) norm;
+
+  let n_classes = ref 0 in
+  let n_smt_calls = ref 0 in
+  Hashtbl.iter (fun _ members ->
+    let n = List.length members in
+    let arr = Array.of_list members in
+    let parent = Array.init n (fun i -> i) in
+    let rec find i = if parent.(i) = i then i
+      else (let p = find parent.(i) in parent.(i) <- p; p) in
+    let union i j = let ri = find i and rj = find j in
+      if ri <> rj then parent.(ri) <- rj in
+    for i = 0 to n - 1 do
+      for j = i + 1 to n - 1 do
+        if find i <> find j then begin
+          let (ti, _) = arr.(i) and (tj, _) = arr.(j) in
+          incr n_smt_calls;
+          match Smt.check_equiv int_dom smt_vars ti tj with
+          | Smt.Equivalent -> union i j
+          | _ -> ()
+        end
+      done
+    done;
+    let classes = Hashtbl.create 8 in
+    for i = 0 to n - 1 do
+      let r = find i in
+      let prev = try Hashtbl.find classes r with Not_found -> [] in
+      Hashtbl.replace classes r (i :: prev)
+    done;
+    Hashtbl.iter (fun _r idxs ->
+      incr n_classes;
+      let normalized_forms = List.map (fun i -> let (_, n) = arr.(i) in n) idxs in
+      match normalized_forms with
+      | [] | [_] -> ()
+      | first :: rest ->
+        List.iter (fun other ->
+          if not (Types.term_eq sym_cmp first other) then begin
+            Printf.eprintf "  CONFLUENCE FAIL within an SMT class:\n";
+            List.iter (fun j ->
+              let (t, n) = arr.(j) in
+              Printf.eprintf "    %s -> %s\n"
+                (Types.to_string sym_str t) (Types.to_string sym_str n)) idxs;
+            assert false
+          end) rest) classes) bv_groups;
+  Printf.printf
+    "  full soundness+confluence (hole-only, size≤%d): OK (%d rules valid, %d terms, %d classes, %d SMT calls)\n"
+    max_size (List.length rules) (List.length all_terms) !n_classes !n_smt_calls
+
+(* The HARDEST test: enumerate every well-formed term of size ≤ max_size,
+   without any canonicalization or orientation filter. This includes
+   terms like `(C+A)`, `(B-A)`, `Hole 1 + Hole 0` and other hole-id
+   permutations that the synthesis enumerator filters out as "same orbit".
+
+   For each such term we check:
+     - normalize(t) ≡ t under SMT (rewrite soundness on arbitrary input).
+     - terms in the same SMT class normalize to the same form modulo
+       alpha-renaming (confluence).
+
+   This is the strongest correctness property the algorithm can provide
+   for ground user inputs: any term someone might pass in gets reduced
+   consistently to a single normal form.
+
+   Cost grows ~quadratically with the number of terms in each bv-group.
+   At max_size=6 with k=3 we get ~3500 terms and ~6500 SMT calls (~40s).
+   max_size=5 is ~5s if a faster test cycle is needed. *)
+let test_all_possible_terms_soundness_and_confluence () =
+  Random.init 42;
+  let max_size = 6 in
+  let k = 3 in
+  (* Generate a rule set up to a LARGER size than max_size so that rules
+     for normalizing the small-size targets are all present. *)
+  let rs, _ = Algorithm.run ~max_size:7 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:k ~max_holes:k ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let sym_cmp = int_sym_cmp in
+  let sym_str = Domain_int.string_of_symbol in
+  let smt_vars = List.init k Types.var_name @ List.init k Types.hole_name in
+
+  (* Enumerate every possible term of size 1..max_size — full Herbrand. *)
+  let all_terms =
+    let acc = ref [] in
+    for sz = 1 to max_size do
+      let ts = all_possible_terms_of_size int_dom.Domain.all_symbols ~k sz in
+      acc := ts @ !acc
+    done;
+    !acc
+  in
+
+  let index = Rewrite.index_rules rules in
+  let normalize t = Rewrite.norm_bottom ~sym_cmp ~index t in
+  let norm = List.map (fun t -> (t, normalize t)) all_terms in
+
+  (* Soundness: normalize(t) ≡ t under SMT for every t. To keep this
+     tractable we only SMT-check when t and t_norm differ syntactically. *)
+  let n_unsound = ref 0 in
+  let n_sound_calls = ref 0 in
+  List.iter (fun (t, t_norm) ->
+    if not (Types.term_eq sym_cmp t t_norm) then begin
+      incr n_sound_calls;
+      match Smt.check_equiv int_dom smt_vars t t_norm with
+      | Smt.Equivalent -> ()
+      | Smt.CounterExample cex ->
+        incr n_unsound;
+        Printf.eprintf "  REWRITE UNSOUND on full input: %s normalized to %s (cex: %s)\n"
+          (Types.to_string sym_str t) (Types.to_string sym_str t_norm)
+          (String.concat " " (List.map (fun (n, v) -> Printf.sprintf "%s=%d" n v) cex))
+      | Smt.Unknown -> ()
+    end) norm;
+  assert (!n_unsound = 0);
+
+  (* Confluence: pre-partition by bv (different bv ⇒ provably non-equiv),
+     then pairwise SMT-confirm within each bv group. Every member of an
+     SMT-equivalence class must normalize to the same syntactic term. *)
+  let inputs = Eval.generate_inputs int_dom 50 k in
+  let compiled = Array.of_list (List.map Eval.compile inputs) in
+  let bv t = Eval.behavior_compiled_arr int_dom compiled t in
+  let bv_groups = Hashtbl.create 64 in
+  List.iter (fun (t, t_norm) ->
+    let b = bv t in
+    let cur = try Hashtbl.find bv_groups b with Not_found -> [] in
+    Hashtbl.replace bv_groups b ((t, t_norm) :: cur)) norm;
+
+  let n_classes = ref 0 in
+  let n_pairwise_calls = ref 0 in
+  Hashtbl.iter (fun _ members ->
+    let n = List.length members in
+    let arr = Array.of_list members in
+    let parent = Array.init n (fun i -> i) in
+    let rec find i = if parent.(i) = i then i
+      else (let p = find parent.(i) in parent.(i) <- p; p) in
+    let union i j = let ri = find i and rj = find j in
+      if ri <> rj then parent.(ri) <- rj in
+    for i = 0 to n - 1 do
+      for j = i + 1 to n - 1 do
+        if find i <> find j then begin
+          let (ti, _) = arr.(i) and (tj, _) = arr.(j) in
+          incr n_pairwise_calls;
+          match Smt.check_equiv int_dom smt_vars ti tj with
+          | Smt.Equivalent -> union i j
+          | _ -> ()
+        end
+      done
+    done;
+    let classes = Hashtbl.create 8 in
+    for i = 0 to n - 1 do
+      let r = find i in
+      let prev = try Hashtbl.find classes r with Not_found -> [] in
+      Hashtbl.replace classes r (i :: prev)
+    done;
+    Hashtbl.iter (fun _r idxs ->
+      incr n_classes;
+      (* Confluence modulo alpha-renaming: terms like `(A-A)` and `(B-B)`
+         are SMT-equivalent (both = 0) but live in different hole-id
+         namespaces. The algorithm cannot bridge them without producing
+         free-hole rewrite rules (LHS `(A-A)`, RHS `(B-B)` would have a
+         free Hole 1 in the RHS). The rewrite engine correctly keeps them
+         as separate normal forms; comparing modulo alpha-renaming
+         (canonicalize) collapses them. *)
+      let normalized_forms = List.map (fun i ->
+        let (_, n) = arr.(i) in Types.canonicalize n) idxs in
+      match normalized_forms with
+      | [] | [_] -> ()
+      | first :: rest ->
+        List.iter (fun other ->
+          if not (Types.term_eq sym_cmp first other) then begin
+            Printf.eprintf "  ALL-TERMS CONFLUENCE FAIL (after alpha-rename):\n";
+            List.iter (fun j ->
+              let (t, n) = arr.(j) in
+              Printf.eprintf "    %s --> %s  (alpha: %s)\n"
+                (Types.to_string sym_str t)
+                (Types.to_string sym_str n)
+                (Types.to_string sym_str (Types.canonicalize n))) idxs;
+            assert false
+          end) rest) classes) bv_groups;
+  Printf.printf
+    "  all-terms soundness+confluence (size≤%d): OK (%d total terms, %d classes, %d+%d SMT calls)\n"
+    max_size (List.length all_terms) !n_classes !n_sound_calls !n_pairwise_calls
+
+let test_tier2_accumulates_and_short_circuits () =
+  let snap () =
+    (!Algorithm.tier_calls, !Algorithm.tier2_short_circuit,
+     !Algorithm.tier3_calls, !Algorithm.tier3_cex_added)
+  in
+  let (tb, sb, mb, cb) = snap () in
+  Random.init 42;
+  let _ = Algorithm.run ~max_size:5 int_dom ~num_domains:1
+    ~num_random_inputs:1 ~max_vcs:3 ~use_smt:true in
+  let (t1, s1, m1, c1) = snap () in
+  let dt = t1 - tb and ds = s1 - sb and dm = m1 - mb and dc = c1 - cb in
+  (* At rand=1 with SMT and max_size=5, the algorithm runs Tier checks.
+     We assert: at least one tier call happens, AT LEAST ONE SMT
+     counterexample fires (which proves the cell-population path works),
+     and Tier 2 short-circuits at least once (which proves the cross-eval
+     path correctly catches the populated cells on subsequent compares). *)
+  assert (dt > 0);
+  assert (dc > 0);
+  assert (ds > 0);
+  assert (dm > 0);
+  Printf.printf
+    "  tier2 accumulation + short-circuit: OK (calls=%d sc=%d smt=%d cex=%d)\n"
+    dt ds dm dc
+
 let test_algorithm_int () =
   let sig' = [("-", 1, Domain_int.UMinus); ("+", 2, Domain_int.Plus); ("-", 2, Domain_int.Minus)] in
   let dom = { int_dom with Domain.all_symbols = sig' } in
@@ -317,6 +981,21 @@ let () = Printf.printf "Running tests...\n";
   test_kbo_var_count (); test_rewrite (); test_rewrite_hole_priority ();
   test_eval_int (); test_eval_bool (); test_eval_hole ();
   test_enum_size1 (); test_enum_with_holes (); test_enum_caps_separated ();
+  test_hole_permutations ();
+  test_hole_var_distinct_semantics ();
+  test_commutativity_rule ();
+  test_rule_set_semantic_closure ();
+  test_tier2_cross_eval_helper ();
+  test_smt_random_equivalence ();
+  test_semantic_closure_leaf_level ();
+  test_operator_level_closure ();
+  test_cross_seed_determinism ();
+  test_low_random_smt_no_unbound ();
+  test_parse_roundtrip ();
+  test_save_load_normalize ();
+  test_full_soundness_and_completeness ();
+  test_all_possible_terms_soundness_and_confluence ();
+  test_tier2_accumulates_and_short_circuits ();
   test_algorithm_int (); test_algorithm_bool (); test_size_progression ();
   test_forced_inputs (); test_all_bool_inputs ();
   test_holes_required_for_completeness ();

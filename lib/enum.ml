@@ -192,7 +192,18 @@ let enumerate_terms_caps (symbols : (string * int * 's) list)
           List.iter (fun h_part ->
             match apply_partitions ~v_part ~h_part ~caps
                     ~max_v_slots:total_v ~max_h_slots:total_h term with
-            | Some canon -> add canon
+            | Some canon ->
+              (* `apply_partitions` produces ONE first-occurrence
+                 labeling per partition (e.g. `A*(B*A)` for the
+                 0/1/0 slot pattern). But under constP semantics
+                 each labeling is a distinct canonical term — the
+                 other labelings of the same partition shape
+                 (e.g. `B*(A*B)`) are real terms in the equivalence
+                 class. Expand to the hole-id permutation orbit so
+                 every labeling becomes a candidate; bv-bucketing
+                 then groups commutative-equivalent ones and the
+                 winner-extraction emits the appropriate rules. *)
+              List.iter add (Types.hole_permutations canon)
             | None -> ())
             (set_partitions_n total_h))
           (set_partitions_n total_v))
