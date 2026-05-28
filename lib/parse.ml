@@ -87,36 +87,17 @@ let parse_term (decode : string -> int -> 's option) (input : string) : 's Types
       "parse_term: trailing input at pos %d in: %s" !pos input);
   result
 
+let rule_separator_re = Str.regexp "[ \t]+->[ \t]+"
+
 let parse_rule decode line : 's Types.rule =
-  (* Tolerates leading/trailing whitespace and 1+ spaces around the "->". *)
   let trimmed = String.trim line in
-  let arrow = " -> " in
-  match String.index_opt trimmed '-' with
-  | None -> failwith ("parse_rule: no '->' in: " ^ line)
-  | Some _ ->
-    let len = String.length trimmed in
-    let alen = String.length arrow in
-    let rec find_arrow i =
-      if i + alen > len then -1
-      else if String.sub trimmed i alen = arrow then i
-      else find_arrow (i + 1)
-    in
-    let i = find_arrow 0 in
-    if i < 0 then
-      (* Fall back: try "->" without spaces, or "  ->  " etc. *)
-      let re = Str.regexp "[ \t]+->[ \t]+" in
-      (match Str.search_forward re trimmed 0 with
-       | exception Not_found ->
-         failwith ("parse_rule: no '->' in: " ^ line)
-       | j ->
-         let l = String.sub trimmed 0 j in
-         let r_start = Str.match_end () in
-         let r = String.sub trimmed r_start (String.length trimmed - r_start) in
-         (parse_term decode l, parse_term decode r))
-    else
-      let l = String.sub trimmed 0 i in
-      let r = String.sub trimmed (i + alen) (len - i - alen) in
-      (parse_term decode l, parse_term decode r)
+  match Str.search_forward rule_separator_re trimmed 0 with
+  | exception Not_found -> failwith ("parse_rule: no '->' in: " ^ line)
+  | j ->
+    let l = String.sub trimmed 0 j in
+    let r_start = Str.match_end () in
+    let r = String.sub trimmed r_start (String.length trimmed - r_start) in
+    (parse_term decode l, parse_term decode r)
 
 (* Build a decoder from a domain's symbol table. *)
 let decoder_of_symbols (all_symbols : (string * int * 's) list) =
@@ -124,39 +105,30 @@ let decoder_of_symbols (all_symbols : (string * int * 's) list) =
     List.find_map (fun (n, a, s) ->
       if n = name && a = arity then Some s else None) all_symbols
 
-let load_rules decode path : 's Types.rule list =
+(* Read non-blank, non-comment lines from `path` and apply `parse_line`. *)
+let load_lines parse_line path =
   let ic = open_in path in
-  let rules = ref [] in
+  let acc = ref [] in
   (try while true do
     let line = input_line ic in
     let s = String.trim line in
-    if s <> "" && s.[0] <> '#' then
-      rules := parse_rule decode line :: !rules
+    if s <> "" && s.[0] <> '#' then acc := parse_line line :: !acc
   done with End_of_file -> ());
   close_in ic;
-  List.rev !rules
+  List.rev !acc
 
-let load_terms decode path : 's Types.term list =
-  let ic = open_in path in
-  let terms = ref [] in
-  (try while true do
-    let line = input_line ic in
-    let s = String.trim line in
-    if s <> "" && s.[0] <> '#' then
-      terms := parse_term decode s :: !terms
-  done with End_of_file -> ());
-  close_in ic;
-  List.rev !terms
+let load_rules decode path : 's Types.rule list = load_lines (parse_rule decode) path
+let load_terms decode path : 's Types.term list = load_lines (parse_term decode) path
+
+(* Write each item as a line produced by `format`. *)
+let save_lines format path items =
+  let oc = open_out path in
+  List.iter (fun x -> output_string oc (format x); output_char oc '\n') items;
+  close_out oc
 
 let save_rules sym_str path rules =
-  let oc = open_out path in
-  List.iter (fun (l, r) ->
-    Printf.fprintf oc "%s -> %s\n"
-      (Types.to_string sym_str l) (Types.to_string sym_str r)) rules;
-  close_out oc
+  save_lines (fun (l, r) ->
+    Types.to_string sym_str l ^ " -> " ^ Types.to_string sym_str r) path rules
 
 let save_terms sym_str path terms =
-  let oc = open_out path in
-  List.iter (fun t ->
-    Printf.fprintf oc "%s\n" (Types.to_string sym_str t)) terms;
-  close_out oc
+  save_lines (Types.to_string sym_str) path terms

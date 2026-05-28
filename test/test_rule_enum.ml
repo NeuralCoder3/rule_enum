@@ -408,10 +408,9 @@ let test_tier2_cross_eval_helper () =
   assert (List.length !ex4 = 2);
   Printf.printf "  tier2 cross-eval helper: OK\n"
 
-(* Manual: at the recommended config (--random 100, max_holes=0),
-   --random and --random --smt produce IDENTICAL rule sets. Locks in
-   the property that SMT confirmation introduces no spurious additions
-   or rejections at this density. *)
+(* At the recommended config (--random 100, max_holes=0), --random and
+   --random --smt produce identical rule sets — SMT confirmation neither
+   adds nor rejects rules at this density. *)
 let test_smt_random_equivalence () =
   let run ?(use_smt = false) ?(max_holes = 0) () =
     Random.init 42;
@@ -508,10 +507,10 @@ let test_operator_level_closure () =
     end) pairs;
   Printf.printf "  semantic closure (operator-level): OK (%d pairs)\n" (List.length pairs)
 
-(* Manual: with the same seed, the algorithm produces byte-identical
-   output. Without Random.init the test relies on Random.self_init which
-   pulls from the system — that masked any seed-dependent nondeterminism
-   we'd want to surface. *)
+(* Same seed → identical rule set; different seed → same rule set for
+   this domain at this size (stable across seeds). Calls `Random.init`
+   explicitly to surface any seed-dependent nondeterminism that
+   `Random.self_init` would have masked. *)
 let test_cross_seed_determinism () =
   let run_with_seed seed =
     Random.init seed;
@@ -534,11 +533,10 @@ let test_cross_seed_determinism () =
   assert (j1 = i1);
   Printf.printf "  cross-seed determinism: OK\n"
 
-(* Manual: --random-inputs 1 --smt used to crash with "Unbound name: A"
-   because SMT counterexamples sometimes omit hole-slot assignments and
-   downstream Eval saw missing names. Fixed by padding missing names
-   with 0 in tier3_smt. Regression test: just run the path without
-   exception. *)
+(* Regression: --random-inputs 1 --smt formerly crashed with "Unbound
+   name: A" when SMT counterexamples omitted hole-slot assignments and
+   downstream Eval saw missing names. tier3_smt now pads missing names
+   with 0; the test just runs the path without exception. *)
 let test_low_random_smt_no_unbound () =
   Random.init 42;
   let rs, _ = Algorithm.run ~max_size:4 int_dom ~num_domains:1
@@ -547,16 +545,8 @@ let test_low_random_smt_no_unbound () =
   Printf.printf "  low-random smt (no Unbound crash): OK (%d irrs)\n"
     (List.length rs.Algorithm.behaviors)
 
-(* Manual: at low random count, Tier 2 short-circuits a meaningful
-   fraction of would-be-SMT calls (~48% at rand=1 in our profiling).
-   This locks in that the cells actually accumulate from SMT
-   counterexamples and that cross-eval triggers downstream.
-
-   The counters are global (cheap incrementing) and persist across runs;
-   we capture before/after deltas. *)
-(* Parser round-trips every term the pretty-printer emits. Tests the
-   load-able rule/irreducible file format introduced for `--rule-output`
-   and `--eval`. *)
+(* Round-trips every term the pretty-printer emits through the
+   load-able file format used by --rule-output / --eval. *)
 let test_parse_roundtrip () =
   let sym_str = Domain_int.string_of_symbol in
   let decode = Parse.decoder_of_symbols int_dom.Domain.all_symbols in
@@ -904,6 +894,9 @@ let test_all_possible_terms_soundness_and_confluence () =
     "  all-terms soundness+confluence (size≤%d): OK (%d total terms, %d classes, %d+%d SMT calls)\n"
     max_size (List.length all_terms) !n_classes !n_sound_calls !n_pairwise_calls
 
+(* Tier 2 must short-circuit some SMT calls when cells are populated.
+   At rand=1 size 5 we observe ~50% short-circuit; this asserts the
+   cells-accumulate-then-cross-eval path actually fires. *)
 let test_tier2_accumulates_and_short_circuits () =
   let snap () =
     (!Algorithm.tier_calls, !Algorithm.tier2_short_circuit,

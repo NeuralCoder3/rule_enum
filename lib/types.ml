@@ -315,8 +315,11 @@ let vars_to_holes t =
    in the term (e.g., `Hole 0 + Hole 0`) collapse some, so we dedupe. *)
 let hole_permutations t =
   let h_ids = ref [] in
+  let max_id = ref (-1) in
   let rec collect = function
-    | Hole h -> if not (List.mem h !h_ids) then h_ids := h :: !h_ids
+    | Hole h ->
+      if h > !max_id then max_id := h;
+      if not (List.mem h !h_ids) then h_ids := h :: !h_ids
     | Var _ -> ()
     | Node (_, args) -> List.iter collect args
   in
@@ -334,70 +337,20 @@ let hole_permutations t =
     in
     let all_perms = perms_of ids in
     let seen = Hashtbl.create (List.length all_perms) in
+    (* Reusable scratch array: index by source hole id, value is the
+       permuted hole id. Indexed lookup is O(1) vs the O(n) List.assoc
+       used previously. *)
+    let map = Array.make (!max_id + 1) 0 in
     List.filter_map (fun perm ->
-      let m = List.combine ids perm in
+      List.iter2 (fun src dst -> map.(src) <- dst) ids perm;
       let rec go = function
-        | Hole h -> Hole (List.assoc h m)
+        | Hole h -> Hole map.(h)
         | Var _ as v -> v
         | Node (f, args) -> Node (f, List.map go args)
       in
       let result = go t in
       if Hashtbl.mem seen result then None
       else (Hashtbl.add seen result (); Some result)) all_perms
-
-(* Anonymize a subset of variables: replace each `Var i` where `is_in i`
-   returns true by a fresh `Hole`, leaving other Vars alone. The result
-   is then canonicalized so vars and holes are renumbered into their
-   first-appearance order in separate id spaces. *)
-let anonymize_subset is_in t =
-  let rec go = function
-    | Var v when is_in v -> Hole v
-    | Var _ as v -> v
-    | Hole _ as h -> h
-    | Node (f, args) -> Node (f, List.map go args)
-  in canonicalize (go t)
-
-(* Enumerate all subsets of a set of var ids (including empty and full).
-   Returns subsets as `int -> bool` predicates. *)
-let all_var_subsets var_ids =
-  let n = List.length var_ids in
-  let arr = Array.of_list var_ids in
-  let result = ref [] in
-  for mask = 0 to (1 lsl n) - 1 do
-    let in_set = Array.make n false in
-    for i = 0 to n - 1 do
-      if (mask lsr i) land 1 = 1 then in_set.(i) <- true
-    done;
-    let lookup v =
-      let found = ref false in
-      Array.iteri (fun i v' -> if v = v' && in_set.(i) then found := true) arr;
-      !found
-    in
-    result := lookup :: !result
-  done;
-  !result
-
-let distinct_var_ids t =
-  let h = Hashtbl.create 4 in
-  let rec go = function
-    | Var v -> Hashtbl.replace h v ()
-    | Hole _ -> ()
-    | Node (_, args) -> List.iter go args
-  in go t;
-  Hashtbl.fold (fun v () acc -> v :: acc) h []
-
-(* Generate all anonymization variants of a term (one per subset of its
-   distinct vars). Each variant is canonicalized. The original term
-   itself is included (empty subset). Duplicates are removed via the
-   `dedup` table. *)
-let anonymization_variants t =
-  let var_ids = distinct_var_ids t in
-  let subsets = all_var_subsets var_ids in
-  let dedup = Hashtbl.create 8 in
-  List.filter_map (fun in_set ->
-    let v = anonymize_subset in_set t in
-    if Hashtbl.mem dedup v then None
-    else (Hashtbl.add dedup v (); Some v)) subsets
 
 let var_names_cache =
   Array.init 26 (fun i -> String.make 1 (Char.chr (Char.code 'a' + i)))

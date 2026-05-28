@@ -171,30 +171,21 @@ type match_kind = Size | Kbo | Replace | Skip
    primary so find_best doesn't see the same source multiple times when
    the candidate happens to share its primary bv with one of its own
    anon-variant bvs. *)
-let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs_arr
+let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
       ~norm_index ~behaviors ~behaviors_by_bv
-      ~use_smt ~smt_vars:_ ~sym_cmp t =
+      ~use_smt ~sym_cmp t =
   let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
-  let equiv_irrs _simplified ex bv =
-    let candidates =
-      if Array.length bv = 0 then
-        if not use_smt then []
-        else List.filter (fun (_, irr_bv, _) -> Array.length irr_bv = 0) behaviors
-      else match Hashtbl.find_opt behaviors_by_bv bv with
-        | Some irrs -> irrs
-        | None -> []
-    in
-    (* Tier 2 / 3 are deferred to rule-emission time (see
-       `apply_decisions` / post-group code), where we have both terms'
-       cells in scope and can mutate them. *)
-    let _ = ex in
-    candidates
-    (* Tier 3 (SMT) is deferred to rule-emission time inside
-       `apply_decisions`. Calling SMT here would mean O(candidates ×
-       bucket_size) calls — far more than needed. Instead we run SMT
-       only when a rule is about to be committed: random's bv-match is
-       a cheap prefilter, KBO determines the rule direction, then SMT
-       confirms the (LHS, RHS) pair really are equivalent. *)
+  (* Tier 2 / 3 are deferred to rule-emission time (apply_decisions and
+     post-group code), where we have both terms' cells in scope and can
+     mutate them. Calling SMT here would cost O(candidates × bucket_size)
+     calls; deferring lets us amortize over the committed rules only. *)
+  let equiv_irrs bv =
+    if Array.length bv = 0 then
+      if not use_smt then []
+      else List.filter (fun (_, irr_bv, _) -> Array.length irr_bv = 0) behaviors
+    else match Hashtbl.find_opt behaviors_by_bv bv with
+      | Some irrs -> irrs
+      | None -> []
   in
   (* `find_best`:
      For each candidate equivalent irreducible, choose the best KBO
@@ -261,7 +252,8 @@ let process_term (dom : ('s, 'a) Domain.t) ~inputs:_ ~compiled_inputs_arr
   in
   let decide ex bv simplified =
     let cand = (simplified, bv, ex) in
-    match find_best simplified (equiv_irrs simplified ex bv) with
+    let _ = ex in
+    match find_best simplified (equiv_irrs bv) with
     | (None, None) -> Some (D_candidate (simplified, bv, ex))
     | (None, Some ((lhs_hole, rhs_hole), Size, irr_src)) ->
       Some (D_size_rule ((lhs_hole, rhs_hole), cand, irr_src))
@@ -311,34 +303,35 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
     let rhs_ex = cell_of_irr src_rhs in
     confirm_equiv ~use_smt ~smt_vars dom src_lhs cand_ex src_rhs rhs_ex
   in
-  (* If SMT rejects a rule (random false positive), the candidate is
-     demoted to a new irreducible. Without this, low-random runs would
-     silently lose many genuinely-new irreducibles. *)
-  let commit_size_rule cand rule src_lhs src_rhs =
+  (* On SMT rejection, demote the candidate back to D_candidate so it
+     becomes a new irreducible. Without this, runs at low random counts
+     silently lose genuinely-new irreducibles when SMT rejects a rule. *)
+  let commit_rule ~seen ~committed cand rule src_lhs src_rhs =
     let (simplified, bv, ex) = cand in
-    if Hashtbl.mem size_seen rule then ()
+    if Hashtbl.mem seen rule then ()
     else if confirms ex src_lhs src_rhs then begin
-      Hashtbl.add size_seen rule ();
-      rs.size_rules <- rule :: rs.size_rules;
-      new_size_rules := rule :: !new_size_rules
+      Hashtbl.add seen rule ();
+      committed rule
     end else
       candidates := (simplified, bv, ex) :: !candidates
   in
-  let commit_kbo_rule cand rule src_lhs src_rhs =
-    let (simplified, bv, ex) = cand in
-    if Hashtbl.mem kbo_seen rule then ()
-    else if confirms ex src_lhs src_rhs then begin
-      Hashtbl.add kbo_seen rule ();
-      rs.kbo_rules <- rule :: rs.kbo_rules;
-      new_kbo_rules := rule :: !new_kbo_rules
-    end else
-      candidates := (simplified, bv, ex) :: !candidates
+  let commit_size cand rule src_lhs src_rhs =
+    commit_rule ~seen:size_seen ~committed:(fun r ->
+      rs.size_rules <- r :: rs.size_rules;
+      new_size_rules := r :: !new_size_rules)
+      cand rule src_lhs src_rhs
+  in
+  let commit_kbo cand rule src_lhs src_rhs =
+    commit_rule ~seen:kbo_seen ~committed:(fun r ->
+      rs.kbo_rules <- r :: rs.kbo_rules;
+      new_kbo_rules := r :: !new_kbo_rules)
+      cand rule src_lhs src_rhs
   in
   List.iter (function
     | D_size_rule (rule, cand, irr_src) ->
-      commit_size_rule cand rule (fst rule) irr_src
+      commit_size cand rule (fst rule) irr_src
     | D_kbo_rule (rule, cand, irr_src) ->
-      commit_kbo_rule cand rule (fst rule) irr_src
+      commit_kbo cand rule (fst rule) irr_src
     | D_replace (old_irr, new_term, stored_bv, ex) ->
       let cand = (new_term, stored_bv, ex) in
       let idx = ref (-1) in
@@ -350,10 +343,10 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
         match Kbo.kbo dom.Domain.sym_compare new_term current_irr with
         | Kbo.Equal -> ()
         | Kbo.Greater ->
-          commit_kbo_rule cand (new_term, current_irr) new_term current_irr
+          commit_kbo cand (new_term, current_irr) new_term current_irr
         | Kbo.Less ->
           let rule = (current_irr, new_term) in
-          commit_kbo_rule cand rule new_term current_irr;
+          commit_kbo cand rule new_term current_irr;
           let new_bv = Eval.behavior dom inputs new_term in
           (* new_term ≡ old_irr was SMT-confirmed inside commit_kbo_rule;
              safe to inherit the accumulated cell. *)
@@ -372,27 +365,6 @@ let build_bv_index behaviors =
   List.iter (fun ((_, bv, _) as entry) ->
     let bucket = try Hashtbl.find h bv with Not_found -> [] in
     Hashtbl.replace h bv (entry :: bucket)) behaviors;
-  h
-
-(* Bucket including anon variants. Each entry is `(form, source, bv, ex)`.
-   For each irreducible T, we insert (T, T, bv_T, ex) — the primary —
-   plus one entry per non-trivial anon variant T_S with its own bv_S.
-   The `source` always points back to the var-canonical irreducible
-   from which the form was derived. This lets candidates look up
-   anon-variant bvs and find equivalences across DIFFERENT source IRs
-   (the Cat A/C case). *)
-let build_bv_index_with_anons dom inputs behaviors =
-  let h = Hashtbl.create (max 16 (8 * List.length behaviors)) in
-  List.iter (fun ((t, primary_bv, _ex) as primary) ->
-    let bucket = try Hashtbl.find h primary_bv with Not_found -> [] in
-    Hashtbl.replace h primary_bv ((t, primary) :: bucket);
-    let variants = Types.anonymization_variants t in
-    List.iter (fun v ->
-      if not (Types.term_eq dom.Domain.sym_compare v t) then begin
-        let bv_v = Eval.behavior dom inputs v in
-        let bucket = try Hashtbl.find h bv_v with Not_found -> [] in
-        Hashtbl.replace h bv_v ((v, primary) :: bucket)
-      end) variants) behaviors;
   h
 
 (* Subpass: normalize + decide on a list of enumerated terms.
@@ -443,9 +415,9 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
       ~num_domains ~use_smt ~smt_vars ~sym_cmp enumerated =
   let norm_index = Rewrite.index_rules (all_rules rs) in
   let behaviors_by_bv = build_bv_index rs.behaviors in
-  let f = process_term dom ~inputs:all_inputs ~compiled_inputs_arr
+  let f = process_term dom ~compiled_inputs_arr
             ~norm_index ~behaviors:rs.behaviors
-            ~behaviors_by_bv ~use_smt ~smt_vars ~sym_cmp in
+            ~behaviors_by_bv ~use_smt ~sym_cmp in
   let decisions = parallel_filter_map ~num_domains f enumerated in
   apply_decisions dom rs ~inputs:all_inputs ~size_seen ~kbo_seen
     ~use_smt ~smt_vars decisions
