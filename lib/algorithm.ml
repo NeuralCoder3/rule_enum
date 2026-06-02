@@ -337,12 +337,13 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
       Some (D_candidate (simplified, bv, ex))
   in
   (* Inputs come from enumerate_terms_caps which produces canonical
-     terms. `normalize_canonical_or_skip` short-circuits as soon as it
-     detects a strict size reduction (we'd skip the term anyway, so no
-     need to finish rewriting/canonicalize). *)
+     terms. `normalize_canonical_or_skip` returns None as soon as ANY
+     rule applies — the term is reducible, so it is not an irreducible
+     candidate, and its normal form is enumerated and processed on its
+     own. Only terms with no applicable rule reach `decide`. *)
   match Rewrite.normalize_canonical_or_skip ~sym_cmp ~index:norm_index t with
-  | None -> None  (* size reduced; term filtered out *)
-  | Some (simplified, _changed) ->
+  | None -> None  (* reducible; handled via its normal form *)
+  | Some simplified ->
     let bv = Eval.behavior_compiled_arr dom compiled_inputs_arr simplified in
     let ex = new_examples () in
     decide ex bv simplified

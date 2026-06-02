@@ -374,15 +374,32 @@ let apply_var_const vmap hmap t =
     | Node (f, args) -> Node (f, List.map go args)
   in go t
 
-(* Reinterpret every `Var i` as `Hole i` (treating schema variables as
-   constant placeholders for the purpose of KBO ordering). After this
-   the term is NoVar, so the classical-KBO totality on NoVar applies.
+(* Reinterpret every `Var i` as a constant placeholder (Hole), treating
+   schema variables as constPs for the purpose of KBO ordering. After
+   this the term is NoVar, so the classical-KBO totality on NoVar applies.
+
+   Var-derived holes are shifted past any pre-existing hole ids so a
+   variable is never conflated with an unrelated hole that happens to
+   share its index. Without the shift, `a*(b*A)` (= Var0 * (Var1 * Hole0))
+   would map to `Hole0 * (Hole1 * Hole0)` — wrongly identifying the
+   variable `a` with the hole `A` (both index 0) and collapsing three
+   distinct leaves to two, which breaks orientation of mixed var/hole
+   terms. Callers canonicalize the result, so the exact shifted ids don't
+   matter, only that distinct entities stay distinct.
 
    Used when emitting a rule whose var-form is KBO-Incomparable but
    whose constP-form is orderable. *)
 let vars_to_holes t =
+  let max_hole = ref (-1) in
+  let rec scan = function
+    | Hole h -> if h > !max_hole then max_hole := h
+    | Var _ -> ()
+    | Node (_, args) -> List.iter scan args
+  in
+  scan t;
+  let offset = !max_hole + 1 in
   let rec go = function
-    | Var v -> mk_hole v
+    | Var v -> mk_hole (v + offset)
     | Hole _ as h -> h
     | Node (f, args) -> mk_node f (List.map go args)
   in go t

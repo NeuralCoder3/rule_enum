@@ -333,6 +333,42 @@ let test_commutativity_rule () =
   assert (not (has "(A-B) -> (B-A)"));
   Printf.printf "  commutativity rule generation: OK\n"
 
+(* Regression for the same-size orientation concern: when two same-size
+   equivalent terms are enumerated (e.g. B+A and A+B), the KBO-larger one
+   must NOT survive as an irreducible — a rule orienting it to the
+   KBO-smaller rep must be emitted, regardless of enumeration order.
+   Concretely: no two distinct irreducibles may be behavior-equivalent
+   (that would mean a missing orienting rule), and each irreducible must
+   be the KBO-minimum of its own behavior class. *)
+let test_no_equivalent_irreducibles () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:6 int_dom ~num_domains:1
+    ~num_random_inputs:200 ~max_vcs:3 ~max_holes:3 in
+  let sym_cmp = int_sym_cmp in
+  let inputs = Eval.generate_inputs int_dom 200 3 in
+  let compiled = Array.of_list (List.map Eval.compile inputs) in
+  let irrs = List.map (fun (t, _, _) -> t) rs.Algorithm.behaviors in
+  (* Group irreducibles by behavior vector; any bucket with >1 member is
+     a missing-orientation bug. *)
+  let by_bv = Hashtbl.create 256 in
+  List.iter (fun t ->
+    let bv = Eval.behavior_compiled_arr int_dom compiled t in
+    let prev = try Hashtbl.find by_bv bv with Not_found -> [] in
+    Hashtbl.replace by_bv bv (t :: prev)) irrs;
+  let collisions = Hashtbl.fold (fun _ ts acc ->
+    if List.length ts > 1 then ts :: acc else acc) by_bv [] in
+  if collisions <> [] then begin
+    Printf.eprintf "  equivalent irreducibles (missing orientation rule):\n";
+    List.iter (fun ts ->
+      Printf.eprintf "    { %s }\n"
+        (String.concat ", " (List.map (Types.to_string Domain_int.string_of_symbol) ts)))
+      collisions;
+    assert false
+  end;
+  Printf.printf "  no equivalent irreducibles: OK (%d irreducibles, all distinct bv)\n"
+    (List.length irrs);
+  ignore sym_cmp
+
 (* End-to-end semantic check: the synthesized rule set should normalize
    any two universally-equivalent terms to the same normal form. We
    sample pairs of terms and verify the rewrite engine converges. *)
@@ -1005,6 +1041,7 @@ let () = Printf.printf "Running tests...\n";
   test_hole_permutations ();
   test_hole_var_distinct_semantics ();
   test_commutativity_rule ();
+  test_no_equivalent_irreducibles ();
   test_rule_set_semantic_closure ();
   test_tier2_cross_eval_helper ();
   test_smt_random_equivalence ();

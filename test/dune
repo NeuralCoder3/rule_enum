@@ -25,6 +25,3 @@
 (executable
  (name profile_inner)
  (libraries rule_enum))
-
-
-

@@ -143,41 +143,64 @@ let normalize_canonical ~sym_cmp ~index t =
   let r = if changed then Types.canonicalize r else r in
   (r, Types.size r < sz0)
 
-(* Hot path for process_term:
-   * Returns `None` as soon as ANY recursion level shrinks (input size at
-     that level > output size). Subterm shrinkage propagates up because
-     `size` is additive over `Node`.
-   * Returns `Some (simplified, changed)` if the term doesn't size-reduce.
+(* Hot path for process_term: decide whether an enumerated term is an
+   irreducible candidate. Returns `None` (skip) as soon as ANY rule fires
+   anywhere in the term — at a subterm or the root, whether it shrinks or
+   keeps the size. A reducible term is never irreducible, so it is dropped
+   without finishing the rewrite. Returns `Some t` (t unchanged, already
+   canonical from enumeration) only when no rule applies.
 
-   This avoids the leftover rewrite work and the canonicalize pass for
-   the ~67% of enumerated terms that reduce (the common case). *)
-exception Size_reduced
+   Why dropping same-size rewrites is safe: the enumerator builds size-n
+   terms from the listed canonical irreducibles, and every term that is
+   irreducible w.r.t. the current rules is a listed canonical rep (each
+   completed iteration orients all same-size equivalences into rules —
+   this relies on `vars_to_holes` keeping distinct leaves distinct so
+   mixed var/hole equivalences like a*(b*A) ≡ A*(a*b) are orientable). So
+   the normal form of a reducible term is itself enumerated — in this
+   iteration if same-size, an earlier one if smaller — and processed on
+   its own. Verified by the exhaustive soundness+confluence tests.
+
+   Set RULE_ENUM_NO_SKIP=1 to fall back to the conservative behavior
+   (skip only on size reduction, process same-size normal forms). *)
+exception Reducible
+
+let no_skip = try Sys.getenv "RULE_ENUM_NO_SKIP" = "1" with Not_found -> false
 
 let normalize_canonical_or_skip ~sym_cmp ~index t =
-  let rec go t =
-    match t with
-    | Types.Var _ | Types.Hole _ -> (t, false)
-    | Types.Node (f, args) ->
-      let in_sz = Types.size t in
-      let any_changed = ref false in
-      let args' = List.map (fun a ->
-        let (a', c) = go a in
-        if c then any_changed := true; a') args in
-      let t' = Types.mk_node f args' in
-      if Types.size t' < in_sz then raise Size_reduced;
-      match try_rewrite sym_cmp index t' with
-      | None -> (t', !any_changed)
-      | Some t'' ->
-        if Types.size t'' < in_sz then raise Size_reduced;
-        let (t''', _) = go t'' in
-        if Types.size t''' < in_sz then raise Size_reduced;
-        (t''', true)
-  in
-  try
-    let (r, changed) = go t in
-    let r = if changed then Types.canonicalize r else r in
-    Some (r, changed)
-  with Size_reduced -> None
+  if no_skip then begin
+    (* Conservative: skip only on strict size reduction; for same-size
+       rewrites return the fully-normalized form for `decide`. *)
+    let rec go t = match t with
+      | Types.Var _ | Types.Hole _ -> (t, false)
+      | Types.Node (f, args) ->
+        let in_sz = Types.size t in
+        let changed = ref false in
+        let args' = List.map (fun a -> let (a', c) = go a in if c then changed := true; a') args in
+        let t' = Types.mk_node f args' in
+        if Types.size t' < in_sz then raise Reducible;
+        (match try_rewrite sym_cmp index t' with
+         | None -> (t', !changed)
+         | Some t'' ->
+           if Types.size t'' < in_sz then raise Reducible;
+           let (t''', _) = go t'' in
+           if Types.size t''' < in_sz then raise Reducible;
+           (t''', true))
+    in
+    (try let (r, c) = go t in Some (if c then Types.canonicalize r else r)
+     with Reducible -> None)
+  end else
+    (* `go` raises `Reducible` at the first rule firing (in a subterm via
+       recursion, or at the current node); if it returns, the term is
+       irreducible. *)
+    let rec go t = match t with
+      | Types.Var _ | Types.Hole _ -> t
+      | Types.Node (f, args) ->
+        let t' = Types.mk_node f (List.map go args) in
+        (match try_rewrite sym_cmp index t' with
+         | None -> t'
+         | Some _ -> raise Reducible)
+    in
+    try Some (go t) with Reducible -> None
 
 let normalize_with_index ~sym_cmp rules t = normalize ~sym_cmp ~index:(index_rules rules) t
 
