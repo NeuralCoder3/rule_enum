@@ -425,8 +425,36 @@ let test_smt_random_equivalence () =
   let i2 = List.sort compare (List.map (fun (t, _, _) -> t) rs_smt.Algorithm.behaviors) in
   assert (r1 = r2);
   assert (i1 = i2);
-  Printf.printf "  smt/random equivalence: OK (rules=%d irrs=%d)\n"
-    (List.length r1) (List.length i1)
+  (* The int domain never makes Z3 return Unknown, so every emitted rule
+     is SMT-proven: nothing should be logged as an assumed equivalence. *)
+  assert (rs_smt.Algorithm.assumed_rules = []);
+  Printf.printf "  smt/random equivalence: OK (rules=%d irrs=%d, assumed=%d)\n"
+    (List.length r1) (List.length i1) (List.length rs_smt.Algorithm.assumed_rules)
+
+(* Safe mode must never assume unproven equivalences: assumed_rules stays
+   empty, and a safe run is a subset (rule-wise) of the default run. For
+   the int domain (no Unknown) the two coincide; this pins the invariant
+   that assumed_rules is empty under safe mode regardless of domain. *)
+let test_safe_mode_no_assumed () =
+  let run ~safe () =
+    Random.init 42;
+    Algorithm.run ~max_size:5 int_dom ~num_domains:1
+      ~num_random_inputs:100 ~max_vcs:3 ~use_smt:true
+      ~assume_unproven:(not safe) |> fst
+  in
+  let rs_default = run ~safe:false () in
+  let rs_safe = run ~safe:true () in
+  assert (rs_safe.Algorithm.assumed_rules = []);
+  (* The int domain never hits Unknown, so safe mode skips nothing. *)
+  assert (rs_safe.Algorithm.skipped_rules = []);
+  assert (rs_default.Algorithm.skipped_rules = []);
+  (* Safe-mode rules are a subset of default-mode rules (safe never adds). *)
+  let to_set rs = List.sort_uniq compare
+    (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules) in
+  let d = to_set rs_default and s = to_set rs_safe in
+  assert (List.for_all (fun r -> List.mem r d) s);
+  Printf.printf "  safe mode (no assumed): OK (default=%d safe=%d)\n"
+    (List.length d) (List.length s)
 
 (* Semantic-closure check for what the algorithm DOES guarantee: pairs
    of universally-equivalent terms that differ only by leaf-level
@@ -980,6 +1008,7 @@ let () = Printf.printf "Running tests...\n";
   test_rule_set_semantic_closure ();
   test_tier2_cross_eval_helper ();
   test_smt_random_equivalence ();
+  test_safe_mode_no_assumed ();
   test_semantic_closure_leaf_level ();
   test_operator_level_closure ();
   test_cross_seed_determinism ();

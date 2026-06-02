@@ -9,3 +9,6 @@ output/
 *.cmo
 smt_lib
 nohup.out
+experiment
+*.pdf
+output*/
