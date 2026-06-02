@@ -36,6 +36,24 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
     Printf.fprintf oc "Size-reducing: %d\nKBO-simplifying: %d\nIrreducible:   %d\n"
       (List.length rs.Rule_enum.Algorithm.size_rules) (List.length rs.Rule_enum.Algorithm.kbo_rules)
       (List.length rs.Rule_enum.Algorithm.behaviors);
+    (* Rules emitted on assumed (random-confident but not SMT-proven)
+       equivalence — SMT returned Unknown and random could not refute. *)
+    let assumed = List.rev rs.Rule_enum.Algorithm.assumed_rules in
+    Printf.fprintf oc "\n=== Assumed (unproven) equivalences: %d ===\n"
+      (List.length assumed);
+    if assumed <> [] then
+      Printf.fprintf oc "(SMT could not prove these; accepted on random confidence. Re-run with --safe-mode to exclude them.)\n";
+    List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
+      (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) assumed;
+    (* Candidate equivalences skipped in safe mode — SMT returned Unknown,
+       random could not refute, and we declined to assume them. *)
+    let skipped = List.rev rs.Rule_enum.Algorithm.skipped_rules in
+    Printf.fprintf oc "\n=== Skipped (unproven, not assumed) equivalences: %d ===\n"
+      (List.length skipped);
+    if skipped <> [] then
+      Printf.fprintf oc "(SMT could not prove these and random could not refute them; not emitted under --safe-mode. Drop --safe-mode, raise --smt-unknown-inputs, or RULE_ENUM_SMT_TIMEOUT_MS to resolve.)\n";
+    List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
+      (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) skipped;
     Printf.fprintf oc "\n=== Irreducible terms (by size) ===\n";
     let sorted = List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors
                  |> List.sort (fun a b -> compare (Rule_enum.Types.size a) (Rule_enum.Types.size b))
@@ -46,24 +64,38 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
-      ~use_smt ~use_smt_forced =
+      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs =
   let sym_str = dom.Rule_enum.Domain.sym_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
   let jobs_str =
     if effective_jobs <= 1 then "1 (single-threaded)"
     else string_of_int effective_jobs in
-  Printf.printf "Domain: %s,  max VCs (k): %d,  max vars: %d,  max holes: %d,  random inputs: %d,  max size: %d,  jobs: %s,  smt: %b,  smt-forced: %b\n\n%!"
-    domain_name max_vcs max_vars max_holes num_rand max_size jobs_str use_smt use_smt_forced;
+  Printf.printf "Domain: %s,  max VCs (k): %d,  max vars: %d,  max holes: %d,  random inputs: %d,  max size: %d,  jobs: %s,  smt: %b,  smt-forced: %b,  safe-mode: %b\n\n%!"
+    domain_name max_vcs max_vars max_holes num_rand max_size jobs_str use_smt use_smt_forced (not assume_unproven);
   let start_time = Unix.gettimeofday () in
   let oc_stats = if stats_file <> "" then Some (open_out stats_file) else None in
   let oc_report = if output_file <> "" then Some (open_out output_file) else None in
   write_header oc_stats oc_report domain_name max_vcs max_size;
+  (* Snapshot the loadable rule / irreducible files from the current
+     state. Called after every iteration so a long (or crashing) run
+     always leaves the latest complete results on disk. Rewrites the
+     whole file because irreducibles can be replaced mid-run (D_replace),
+     not just appended — an append-only log would keep stale entries. *)
+  let write_outputs (rs : (s, 'a) Rule_enum.Algorithm.rule_sets) =
+    if rule_output <> "" then
+      Rule_enum.Parse.save_rules sym_str rule_output
+        (rs.Rule_enum.Algorithm.size_rules @ rs.Rule_enum.Algorithm.kbo_rules);
+    if irred_output <> "" then
+      Rule_enum.Parse.save_terms sym_str irred_output
+        (List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors)
+  in
   let rs, _iters =
     Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand
       ~max_vcs ~max_vars ~max_holes ~num_domains:effective_jobs
-      ~forced_inputs:forced ~use_smt ~use_smt_forced
-      ~on_iteration:(fun s ->
+      ~forced_inputs:forced ~use_smt ~use_smt_forced ~assume_unproven
+      ?unknown_inputs
+      ~on_iteration:(fun rs s ->
         let elapsed = Unix.gettimeofday () -. start_time in
         Printf.printf "Size %d  [%.1fs / %.1fs]  enum=%d  +SR=%d  +KR=%d  +IR=%d  total: SR=%d KR=%d IR=%d\n%!"
           s.Rule_enum.Algorithm.size elapsed s.Rule_enum.Algorithm.time_total
@@ -73,31 +105,42 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
           (List.length s.Rule_enum.Algorithm.new_irreducibles)
           s.Rule_enum.Algorithm.total_size_rules s.Rule_enum.Algorithm.total_kbo_rules
           s.Rule_enum.Algorithm.total_irreducible;
-        write_iteration ?oc_header:oc_stats ?oc_report sym_str s) in
+        write_iteration ?oc_header:oc_stats ?oc_report sym_str s;
+        write_outputs rs) in
   let total_elapsed = Unix.gettimeofday () -. start_time in
   Printf.printf "\nFinal [%.1fs]: SR=%d  KR=%d  IR=%d\n%!"
     total_elapsed (List.length rs.size_rules) (List.length rs.kbo_rules) (List.length rs.behaviors);
-  if try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false then
+  if try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false then begin
     Printf.eprintf
-      "Tier stats: total=%d  tier2_short_circuit=%d  tier3_smt=%d  tier3_cex=%d\n%!"
+      "Tier stats: total=%d  tier2_short_circuit=%d  tier3_smt=%d  tier3_cex=%d  tier3_unknown=%d (refuted=%d)\n%!"
       !Rule_enum.Algorithm.tier_calls
       !Rule_enum.Algorithm.tier2_short_circuit
       !Rule_enum.Algorithm.tier3_calls
-      !Rule_enum.Algorithm.tier3_cex_added;
+      !Rule_enum.Algorithm.tier3_cex_added
+      !Rule_enum.Algorithm.tier3_unknown
+      !Rule_enum.Algorithm.tier3_unknown_refuted;
+    Printf.eprintf "Anon cache: total=%d  distinct=%d  hit-rate=%.1f%%\n%!"
+      !Rule_enum.Algorithm.anon_total
+      !Rule_enum.Algorithm.anon_distinct
+      (100.0 *. (1.0 -. float_of_int !Rule_enum.Algorithm.anon_distinct
+                       /. float_of_int (max 1 !Rule_enum.Algorithm.anon_total)));
+    let h = !Rule_enum.Types.cons_hits
+    and m = !Rule_enum.Types.cons_misses in
+    Printf.eprintf "Term cons cache: hits=%d  misses=%d  hit-rate=%.1f%%  unique=%d\n%!"
+      h m (100.0 *. float_of_int h /. float_of_int (max 1 (h + m))) m
+  end;
   write_footer oc_report sym_str total_elapsed rs;
   Option.iter close_out oc_report; Option.iter close_out oc_stats;
-  (* Save rules / irreducibles in a parseable format if requested. *)
-  if rule_output <> "" then begin
-    let all_rules = rs.Rule_enum.Algorithm.size_rules
-                  @ rs.Rule_enum.Algorithm.kbo_rules in
-    Rule_enum.Parse.save_rules sym_str rule_output all_rules;
-    Printf.printf "Saved %d rules to %s\n%!" (List.length all_rules) rule_output
-  end;
-  if irred_output <> "" then begin
-    let irrs = List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors in
-    Rule_enum.Parse.save_terms sym_str irred_output irrs;
-    Printf.printf "Saved %d irreducibles to %s\n%!" (List.length irrs) irred_output
-  end
+  (* Final snapshot guarantees the files exist even if no iteration ran;
+     otherwise this just re-confirms the last per-iteration write. *)
+  write_outputs rs;
+  if rule_output <> "" then
+    Printf.printf "Saved %d rules to %s\n%!"
+      (List.length rs.Rule_enum.Algorithm.size_rules
+       + List.length rs.Rule_enum.Algorithm.kbo_rules) rule_output;
+  if irred_output <> "" then
+    Printf.printf "Saved %d irreducibles to %s\n%!"
+      (List.length rs.Rule_enum.Algorithm.behaviors) irred_output
 
 (* Eval mode: load a rule set from disk, read input terms one per line,
    normalize each with the loaded rule set, write the normalized forms
@@ -132,8 +175,9 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
   in
   match domain_name with
   | "int" -> load RE.Domain_int.int_domain
+  | "bv" -> load RE.Domain_bv.bv_domain
   | "bool" -> load RE.Domain_bool.bool_domain
-  | _ -> Printf.eprintf "Unknown domain: %s (use int or bool)\n" domain_name; exit 1
+  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" domain_name; exit 1
 
 let () =
   let domain_name = ref "int" in
@@ -148,13 +192,16 @@ let () =
   let use_full = ref false in let max_size = ref 7 in let output_file = ref "" in
   let stats_file = ref "" in let use_smt = ref false in
   let use_smt_forced = ref false in
+  let safe_mode = ref false in
+  (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
+  let smt_unknown_inputs = ref (-1) in
   let rule_output = ref "" in let irred_output = ref "" in
   let eval = ref false in
   let rules_input = ref "" in let terms_input = ref "" in
   (* 0 means auto-detect (RULE_ENUM_JOBS env var, else recommended-domain-count). *)
   let jobs = ref 0 in
   let speclist = [
-    ("--domain", Arg.Set_string domain_name, " int|bool  Evaluation domain (default: int)");
+    ("--domain", Arg.Set_string domain_name, " int|bv|bool  Evaluation domain (default: int)");
     ("--max-vcs", Arg.Set_int max_vcs, " K  Sum bound: distinct vars + distinct holes (default: 3)");
     ("--max-vars", Arg.Set_int max_vars, " N  Distinct-var cap (default: same as --max-vcs)");
     ("--max-holes", Arg.Set_int max_holes, " N  Distinct-hole cap (default: same as --max-vcs); set 0 to disable hole rules");
@@ -162,11 +209,13 @@ let () =
     ("--random-inputs", Arg.Set_int random_inputs, " N  Random inputs, 0 = none (default: 100)");
     ("--full", Arg.Set use_full, " Exhaustive enumeration (bool: all 2^n combos)");
     ("--max-size", Arg.Set_int max_size, " N  Maximum term size (default: 7)");
-    ("--jobs", Arg.Set_int jobs, " N  Parallel worker count (default: RULE_ENUM_JOBS or all cores; 1 = single-threaded)");
+    ("--jobs", Arg.Set_int jobs, " N  Parallel worker count, capped at 64 (default: RULE_ENUM_JOBS or all cores; 1 = single-threaded)");
     ("--output", Arg.Set_string output_file, " FILE  Write full report to FILE (synth) or normalized terms (eval)");
     ("--stats", Arg.Set_string stats_file, " FILE  Write per-iteration CSV to FILE");
     ("--smt", Arg.Set use_smt, " Enable SMT refinement (requires z3 in PATH)");
     ("--smt-forced", Arg.Set use_smt_forced, " Add SMT counterexamples to input set");
+    ("--safe-mode", Arg.Set safe_mode, " Do not assume unproven equivalences: when SMT returns Unknown and random can't refute, keep terms distinct (no rule)");
+    ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
     ("--rule-output", Arg.Set_string rule_output, " FILE  Save rules (one per line) in load-able format");
     ("--irred-output", Arg.Set_string irred_output, " FILE  Save irreducibles (one per line) in load-able format");
     ("--eval", Arg.Set eval, " Run in eval mode: normalize terms from --terms-input using --rules-input");
@@ -189,6 +238,7 @@ let () =
   let num_rand = if !use_full then 0 else !random_inputs in
   let mv = if !max_vars < 0 then !max_vcs else !max_vars in
   let mh = if !max_holes < 0 then !max_vcs else !max_holes in
+  let unknown_inputs = if !smt_unknown_inputs < 0 then None else Some !smt_unknown_inputs in
   (* Sanity: with max_holes=0 (default), enumeration produces only
      var-only terms; constP rules are still emitted post-hoc from var
      equivalences when var-KBO is Incomparable. *)
@@ -199,6 +249,16 @@ let () =
       ~output_file:!output_file ~stats_file:!stats_file
       ~rule_output:!rule_output ~irred_output:!irred_output
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
+      ~assume_unproven:(not !safe_mode)
+      ~unknown_inputs
+  | "bv" -> run_with Rule_enum.Domain_bv.bv_domain [] num_rand
+      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
+      ~num_domains:!jobs ~domain_name:"bv"
+      ~output_file:!output_file ~stats_file:!stats_file
+      ~rule_output:!rule_output ~irred_output:!irred_output
+      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
+      ~assume_unproven:(not !safe_mode)
+      ~unknown_inputs
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
@@ -208,4 +268,6 @@ let () =
       ~output_file:!output_file ~stats_file:!stats_file
       ~rule_output:!rule_output ~irred_output:!irred_output
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
-  | _ -> Printf.eprintf "Unknown domain: %s (use int or bool)\n" !domain_name; exit 1
+      ~assume_unproven:(not !safe_mode)
+      ~unknown_inputs
+  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" !domain_name; exit 1

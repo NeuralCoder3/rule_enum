@@ -7,10 +7,10 @@ let compare_symbol a b = match a, b with
   | Xor, Xor -> 0
 
 let string_of_symbol = function
-  | Not -> "!" | And -> "&" | Or -> "|" | Xor -> "^"
+  | Not -> "~" | And -> "&" | Or -> "|" | Xor -> "^"
 
 let symbol_of_string = function
-  | "!" -> Not | "&" -> And | "|" -> Or | "^" -> Xor
+  | "~" -> Not | "&" -> And | "|" -> Or | "^" -> Xor
   | s -> failwith ("Unknown bool symbol: " ^ s)
 
 let bool_domain : (symbol, bool) Domain.t = {
@@ -36,7 +36,7 @@ let bool_domain : (symbol, bool) Domain.t = {
   Domain.equal = Bool.equal;
   Domain.compare = Bool.compare;
   Domain.all_symbols = [
-    ("!", 1, Not); ("&", 2, And); ("|", 2, Or); ("^", 2, Xor);
+    ("~", 1, Not); ("&", 2, And); ("|", 2, Or); ("^", 2, Xor);
   ];
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;

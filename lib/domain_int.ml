@@ -22,7 +22,9 @@ let int_domain : (symbol, int) Domain.t = {
   );
   Domain.generate_inputs = (fun num_inputs k ->
     (* Caller is responsible for seeding (Random.self_init or Random.init);
-       deterministic seeds enable reproducible benchmarks. *)
+       deterministic seeds enable reproducible benchmarks. Generates both
+       var slots (a, b, …) and hole slots (A, B, …) so hole-containing
+       terms can be evaluated. *)
     let var_names = List.init k (fun i ->
       String.make 1 (Char.chr (Char.code 'a' + i))) in
     let hole_names = List.init k (fun i ->

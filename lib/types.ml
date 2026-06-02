@@ -5,6 +5,89 @@ type 's term =
 
 type 's rule = 's term * 's term
 
+(* Hash-cons table for term subtree sharing.
+
+   Storage-synchronized representation: every distinct subterm is
+   represented by exactly one heap object across the whole run, so
+   common subterms (`a`, `(a+b)`, etc.) consume O(distinct subterms)
+   memory instead of O(total occurrences). Bv arrays in `rs.behaviors`
+   are unaffected, but the term forest collapses.
+
+   Implementation notes:
+   - `mk_node` always returns a physically-identical reference for
+     structurally-equal `(sym, args)` inputs, provided the args were
+     themselves produced by `mk_node` (or are leaves from the leaf
+     caches below).
+   - Hash key combines `sym` with the *physical pointers* of args,
+     making hashing O(arity) regardless of subterm depth.
+   - Bucket lookup uses physical equality on args (also O(arity)) which
+     is valid because hash-consed args are unique by structure.
+   - Cache holds STRONG references — terms persist for the run's
+     lifetime. `clear_cons_cache ()` resets between runs.
+
+   Thread-safety: the cache is a single shared Hashtbl with no locking.
+   It is only ever touched by the main domain. Worker domains (the
+   parallel `process_term` pool) run with `worker_mode` set, in which
+   `mk_node` builds a plain `Node` without consulting the cache, so no
+   two domains ever access the table concurrently. The main domain
+   blocks while workers run (Pool.run waits on a condition), and
+   enumeration / apply / kbo-extract — where the bulk of consing and all
+   persistent term storage happen — are serial on the main domain, so
+   the dedup win is preserved. *)
+let cons_cache : (int, Obj.t list) Hashtbl.t = Hashtbl.create (1 lsl 14)
+let cons_hits = ref 0
+let cons_misses = ref 0
+
+(* Per-domain flag: true in pool workers, false on the main domain.
+   Gates `mk_node` away from the shared cache in workers. *)
+let worker_mode = Stdlib.Domain.DLS.new_key (fun () -> false)
+let enter_worker_mode () = Stdlib.Domain.DLS.set worker_mode true
+
+(* Pre-cached leaves. Var 0..63 and Hole 0..63 are pre-allocated so that
+   `mk_var i` / `mk_hole i` always reuse one heap object per i, enabling
+   the physical-equality fast path in `mk_node`. `Var`/`Hole` carry only
+   an int so the same object is sound across any `'s term` parameter;
+   we cast through `Obj` to escape OCaml's value restriction. *)
+let leaf_cache_size = 64
+let var_leaves : Obj.t array = Array.init leaf_cache_size (fun i -> Obj.repr (Var i))
+let hole_leaves : Obj.t array = Array.init leaf_cache_size (fun i -> Obj.repr (Hole i))
+let mk_var i =
+  if i >= 0 && i < leaf_cache_size then (Obj.obj var_leaves.(i) : _ term)
+  else Var i
+let mk_hole i =
+  if i >= 0 && i < leaf_cache_size then (Obj.obj hole_leaves.(i) : _ term)
+  else Hole i
+
+let rec args_phys_eq a b = match a, b with
+  | [], [] -> true
+  | x :: xs, y :: ys -> x == y && args_phys_eq xs ys
+  | _ -> false
+
+let mk_node sym args =
+  if Stdlib.Domain.DLS.get worker_mode then Node (sym, args)
+  else begin
+    let h = ref (Hashtbl.hash sym) in
+    List.iter (fun a -> h := (!h * 31) lxor (Obj.magic a : int)) args;
+    let key = !h land max_int in
+    let bucket = try Hashtbl.find cons_cache key with Not_found -> [] in
+    let matches obj =
+      match (Obj.obj obj : _ term) with
+      | Node (s', args') -> s' = sym && args_phys_eq args' args
+      | Var _ | Hole _ -> false
+    in
+    match List.find_opt matches bucket with
+    | Some t -> incr cons_hits; (Obj.obj t : _ term)
+    | None ->
+      incr cons_misses;
+      let node = Node (sym, args) in
+      Hashtbl.replace cons_cache key (Obj.repr node :: bucket);
+      node
+  end
+
+let clear_cons_cache () =
+  Hashtbl.clear cons_cache;
+  cons_hits := 0; cons_misses := 0
+
 let rec size = function
   | Var _ -> 1 | Hole _ -> 1
   | Node (_, args) -> 1 + List.fold_left (fun acc t -> acc + size t) 0 args
@@ -152,9 +235,9 @@ let canonicalize t =
     !r
   in
   let rec go = function
-    | Var v -> Var (lookup_or_insert_v v)
-    | Hole h -> Hole (h_rank h)
-    | Node (f, args) -> Node (f, List.map go args)
+    | Var v -> mk_var (lookup_or_insert_v v)
+    | Hole h -> mk_hole (h_rank h)
+    | Node (f, args) -> mk_node f (List.map go args)
   in go t
 
 let rec term_compare sym_cmp t1 t2 =
@@ -203,7 +286,7 @@ let apply_renaming mapping t =
   let rec go = function
     | Var v -> Var (match assoc_opt_int v mapping with Some w -> w | None -> v)
     | Hole _ as h -> h
-    | Node (f, args) -> Node (f, List.map go args)
+    | Node (f, args) -> mk_node f (List.map go args)
   in go t
 
 (* Var-only general substitution (legacy, used for hole-free LHS rules). *)
@@ -224,7 +307,7 @@ let apply_subst mapping t =
   let rec go = function
     | Var v -> (match assoc_opt_int v mapping with Some s -> s | None -> Var v)
     | Hole _ as h -> h
-    | Node (f, args) -> Node (f, List.map go args)
+    | Node (f, args) -> mk_node f (List.map go args)
   in go t
 
 (* Combined match for rules whose LHS may contain both Var and Hole.
@@ -299,9 +382,9 @@ let apply_var_const vmap hmap t =
    whose constP-form is orderable. *)
 let vars_to_holes t =
   let rec go = function
-    | Var v -> Hole v
+    | Var v -> mk_hole v
     | Hole _ as h -> h
-    | Node (f, args) -> Node (f, List.map go args)
+    | Node (f, args) -> mk_node f (List.map go args)
   in go t
 
 (* Generate the renaming-orbit of a hole-containing term: for each
@@ -344,9 +427,9 @@ let hole_permutations t =
     List.filter_map (fun perm ->
       List.iter2 (fun src dst -> map.(src) <- dst) ids perm;
       let rec go = function
-        | Hole h -> Hole map.(h)
+        | Hole h -> mk_hole map.(h)
         | Var _ as v -> v
-        | Node (f, args) -> Node (f, List.map go args)
+        | Node (f, args) -> mk_node f (List.map go args)
       in
       let result = go t in
       if Hashtbl.mem seen result then None

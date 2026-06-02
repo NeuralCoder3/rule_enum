@@ -45,14 +45,27 @@ type ('s, 'a) rule_sets = {
   mutable kbo_rules     : 's Types.rule list;
   mutable behaviors     : ('s Types.term * 'a array * 'a examples) list;
   mutable forced_inputs : (string * int) list list;
+  (* Rules emitted on ASSUMED (not SMT-proven) equivalence: SMT returned
+     Unknown and extra random sampling failed to refute, so we trusted
+     random confidence. Tracked separately so they can be reported and,
+     in safe mode, suppressed. *)
+  mutable assumed_rules : 's Types.rule list;
+  (* Candidate equivalences SKIPPED in safe mode: SMT returned Unknown
+     and random could not refute, but `assume_unproven` is false so we
+     declined to emit the rule. Logged so the user sees what was dropped. *)
+  mutable skipped_rules : 's Types.rule list;
   inputs              : 'a Eval.input list;
   use_smt             : bool;
   use_smt_forced      : bool;
+  (* When false (safe mode), an unproven equivalence is treated as
+     not-equivalent rather than assumed: no rule is emitted from it. *)
+  assume_unproven     : bool;
 }
 
-let create ~use_smt ~use_smt_forced inputs = {
+let create ~use_smt ~use_smt_forced ?(assume_unproven = true) inputs = {
   size_rules = []; kbo_rules = []; behaviors = []; forced_inputs = [];
-  inputs; use_smt; use_smt_forced;
+  assumed_rules = []; skipped_rules = [];
+  inputs; use_smt; use_smt_forced; assume_unproven;
 }
 
 let irreducibles rs = List.map (fun (t, _, _) -> t) rs.behaviors
@@ -94,14 +107,61 @@ let tier_calls = ref 0
 let tier2_short_circuit = ref 0
 let tier3_calls = ref 0
 let tier3_cex_added = ref 0
+let tier3_unknown = ref 0          (* SMT returned Unknown (e.g. timeout) *)
+let tier3_unknown_refuted = ref 0  (* extra random sampling refuted equivalence *)
+(* Counters for post-group orbit-cache instrumentation. *)
+let anon_total = ref 0
+let anon_distinct = ref 0
+
+(* Number of extra random inputs to draw when SMT returns Unknown.
+   Initialized from RULE_ENUM_SMT_UNKNOWN_INPUTS; `run` overrides it from
+   its ?unknown_inputs argument (CLI --smt-unknown-inputs). *)
+let unknown_extra_inputs =
+  ref (match Sys.getenv_opt "RULE_ENUM_SMT_UNKNOWN_INPUTS" with
+       | Some s -> (try max 0 (int_of_string s) with _ -> 1000)
+       | None -> 1000)
+
+(* Equivalence verdict.
+   - `Proven`:   SMT proved equivalence (or no-SMT mode, random is oracle).
+   - `Assumed`:  SMT Unknown, extra random couldn't refute, assume_unproven
+                 → treated as equivalent on random confidence.
+   - `Unproven`: SMT Unknown, extra random couldn't refute, safe mode
+                 → NOT treated as equivalent; the candidate rule is logged
+                 as skipped.
+   - `Not_equiv`: refuted by SMT counterexample or random. *)
+type verdict = Not_equiv | Proven | Assumed | Unproven
+
+(* On SMT Unknown, draw `!unknown_extra_inputs` fresh random assignments
+   and evaluate both terms. If any distinguishes them they are NOT
+   equivalent (record the witness in both cells so future comparisons
+   short-circuit at Tier 2). If none does, the verdict depends on
+   `assume_unproven`: when true, fall back to random confidence and
+   return Assumed; when false (safe mode), return Unproven. *)
+let tier3_unknown_fallback ~assume_unproven (dom : ('s, 'a) Domain.t) ~smt_vars t1 ex1 t2 ex2 =
+  incr tier3_unknown;
+  let k = max 1 (List.length smt_vars / 2) in
+  let extra = dom.Domain.generate_inputs !unknown_extra_inputs k in
+  let rec scan = function
+    | [] -> if assume_unproven then Assumed else Unproven
+    | inp :: rest ->
+      let v1 = (try Eval.eval dom inp t1 with _ -> dom.Domain.int_to_val 0) in
+      let v2 = (try Eval.eval dom inp t2 with _ -> dom.Domain.int_to_val 0) in
+      if dom.Domain.equal v1 v2 then scan rest
+      else begin
+        incr tier3_unknown_refuted;
+        ex1 := (inp, v1) :: !ex1;
+        ex2 := (inp, v2) :: !ex2;
+        Not_equiv
+      end
+  in scan extra
 
 (* Tier 3: invoke SMT after Tier 2 has confirmed cell agreement.
    On CounterExample: convert the assignment via dom.int_to_val,
    evaluate both terms on it, append (input, v) to BOTH cells. *)
-let tier3_smt (dom : ('s, 'a) Domain.t) ~smt_vars t1 (ex1 : 'a examples) t2 (ex2 : 'a examples) =
+let tier3_smt ~assume_unproven (dom : ('s, 'a) Domain.t) ~smt_vars t1 (ex1 : 'a examples) t2 (ex2 : 'a examples) =
   incr tier3_calls;
   match Smt.check_equiv dom smt_vars t1 t2 with
-  | Smt.Equivalent -> true
+  | Smt.Equivalent -> Proven
   | Smt.CounterExample assigns ->
     incr tier3_cex_added;
     (* SMT may omit assignments for vars whose value doesn't matter for
@@ -114,18 +174,28 @@ let tier3_smt (dom : ('s, 'a) Domain.t) ~smt_vars t1 (ex1 : 'a examples) t2 (ex2
     let v2 = Eval.eval dom padded t2 in
     ex1 := (padded, v1) :: !ex1;
     ex2 := (padded, v2) :: !ex2;
-    false
-  | Smt.Unknown -> false
+    Not_equiv
+  | Smt.Unknown -> tier3_unknown_fallback ~assume_unproven dom ~smt_vars t1 ex1 t2 ex2
 
-(* Combined Tier 2 + Tier 3 check. Returns true iff t1 ≡ t2.
+(* Combined Tier 2 + Tier 3 check. Returns the equivalence verdict.
    - Tier 2 (cross-eval) extends both cells and short-circuits on disagreement.
-   - Tier 3 (SMT) only fires if Tier 2 agrees; counterexamples grow both cells. *)
-let confirm_equiv ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
+   - Tier 3 (SMT) only fires if Tier 2 agrees; counterexamples grow both cells.
+   Without SMT, agreement on the cells counts as Proven (random is the
+   only oracle in that mode). *)
+let confirm_verdict ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
   incr tier_calls;
   if not (tier2_cross_eval dom t1 ex1 t2 ex2) then
-    (incr tier2_short_circuit; false)
-  else if not use_smt then true
-  else tier3_smt dom ~smt_vars t1 ex1 t2 ex2
+    (incr tier2_short_circuit; Not_equiv)
+  else if not use_smt then Proven
+  else tier3_smt ~assume_unproven dom ~smt_vars t1 ex1 t2 ex2
+
+(* Boolean view for call sites that only need equiv/not-equiv (grouping,
+   merging). Only Proven and Assumed count as equivalent; Unproven (safe
+   mode) and Not_equiv keep the terms distinct. *)
+let confirm_equiv ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
+  match confirm_verdict ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 with
+  | Proven | Assumed -> true
+  | Unproven | Not_equiv -> false
 
 (* O(n) group via Hashtbl keyed by the bv. The `cmp` arg is unused — we
    rely on Hashtbl's structural hashing / equality (bv keys are
@@ -301,19 +371,27 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
      SMT call (counterexample assignment + each term's value on it). *)
   let confirms cand_ex src_lhs src_rhs =
     let rhs_ex = cell_of_irr src_rhs in
-    confirm_equiv ~use_smt ~smt_vars dom src_lhs cand_ex src_rhs rhs_ex
+    confirm_verdict ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+      dom src_lhs cand_ex src_rhs rhs_ex
   in
-  (* On SMT rejection, demote the candidate back to D_candidate so it
+  (* On not-equivalent, demote the candidate back to D_candidate so it
      becomes a new irreducible. Without this, runs at low random counts
-     silently lose genuinely-new irreducibles when SMT rejects a rule. *)
+     silently lose genuinely-new irreducibles when SMT rejects a rule.
+     On Assumed (unproven), also record the rule for reporting. *)
   let commit_rule ~seen ~committed cand rule src_lhs src_rhs =
     let (simplified, bv, ex) = cand in
     if Hashtbl.mem seen rule then ()
-    else if confirms ex src_lhs src_rhs then begin
-      Hashtbl.add seen rule ();
-      committed rule
-    end else
-      candidates := (simplified, bv, ex) :: !candidates
+    else match confirms ex src_lhs src_rhs with
+      | Not_equiv -> candidates := (simplified, bv, ex) :: !candidates
+      | Unproven ->
+        (* Safe mode: don't emit; keep the candidate as a new irreducible
+           and log the equation we declined to take. *)
+        rs.skipped_rules <- rule :: rs.skipped_rules;
+        candidates := (simplified, bv, ex) :: !candidates
+      | (Proven | Assumed) as v ->
+        Hashtbl.add seen rule ();
+        committed rule;
+        if v = Assumed then rs.assumed_rules <- rule :: rs.assumed_rules
   in
   let commit_size cand rule src_lhs src_rhs =
     commit_rule ~seen:size_seen ~committed:(fun r ->
@@ -383,14 +461,113 @@ let build_bv_index behaviors =
    don't specify. *)
 let parallel_threshold = 1500
 
+(* OCaml's runtime caps the number of domains that can exist over the
+   process lifetime (Max_domains = 128, including the main domain and any
+   backup threads). Spawning a fresh batch of domains every subpass —
+   ~recommended_domain_count() of them, which on a 190-core node is 190 —
+   both exceeds that cap directly AND, via rapid spawn/join churn,
+   exhausts the domain allocator after a few iterations ("failed to
+   allocate domain"). We cap the worker count well below the limit and
+   reuse a single persistent pool across all iterations. *)
+let max_workers = 64
+
 let resolve_num_workers num_domains =
-  match num_domains with
-  | Some n when n > 0 -> n
+  let raw = match num_domains with
+    | Some n when n > 0 -> n
+    | _ ->
+      match Sys.getenv_opt "RULE_ENUM_JOBS" with
+      | Some s -> (try max 1 (int_of_string s) with _ -> 1)
+      | None ->
+        try Stdlib.Domain.recommended_domain_count () with _ -> 1
+  in
+  max 1 (min raw max_workers)
+
+(* Persistent worker pool: a fixed set of long-lived domains pull tasks
+   from a shared queue. Created once (lazily) and reused for every
+   subpass, so the process spawns at most `max_workers` domains total
+   regardless of how many iterations run. *)
+module Pool = struct
+  type t = {
+    mutex : Mutex.t;
+    work_cond : Condition.t;       (* workers wait for tasks *)
+    done_cond : Condition.t;       (* submitter waits for completion *)
+    queue : (unit -> unit) Queue.t;
+    mutable pending : int;         (* tasks submitted but not yet finished *)
+    mutable shutdown : bool;
+    mutable domains : unit Stdlib.Domain.t array;
+  }
+
+  let worker p () =
+    (* Workers must not touch the shared hash-cons cache. *)
+    Types.enter_worker_mode ();
+    let running = ref true in
+    while !running do
+      Mutex.lock p.mutex;
+      while Queue.is_empty p.queue && not p.shutdown do
+        Condition.wait p.work_cond p.mutex
+      done;
+      if Queue.is_empty p.queue && p.shutdown then begin
+        Mutex.unlock p.mutex; running := false
+      end else begin
+        let task = Queue.pop p.queue in
+        Mutex.unlock p.mutex;
+        task ();
+        Mutex.lock p.mutex;
+        p.pending <- p.pending - 1;
+        if p.pending = 0 then Condition.broadcast p.done_cond;
+        Mutex.unlock p.mutex
+      end
+    done
+
+  let create n =
+    let p = {
+      mutex = Mutex.create ();
+      work_cond = Condition.create ();
+      done_cond = Condition.create ();
+      queue = Queue.create ();
+      pending = 0; shutdown = false; domains = [||];
+    } in
+    p.domains <- Array.init n (fun _ -> Stdlib.Domain.spawn (worker p));
+    p
+
+  let size p = Array.length p.domains
+
+  (* Run each thunk on the pool, returning results in submission order.
+     Blocks until all complete. The first task that raises has its
+     exception re-raised after the batch finishes. *)
+  let run p (thunks : (unit -> 'a) array) : 'a array =
+    let n = Array.length thunks in
+    if n = 0 then [||] else begin
+      let results = Array.make n None in
+      let exn = ref None in
+      Mutex.lock p.mutex;
+      p.pending <- n;
+      Array.iteri (fun i th ->
+        Queue.push (fun () ->
+          match th () with
+          | v -> results.(i) <- Some v
+          | exception e ->
+            Mutex.lock p.mutex;
+            if !exn = None then exn := Some e;
+            Mutex.unlock p.mutex) p.queue) thunks;
+      Condition.broadcast p.work_cond;
+      while p.pending > 0 do Condition.wait p.done_cond p.mutex done;
+      Mutex.unlock p.mutex;
+      match !exn with
+      | Some e -> raise e
+      | None -> Array.map (function Some x -> x | None -> assert false) results
+    end
+end
+
+(* Global pool, (re)built when the requested worker count changes. *)
+let pool_ref : Pool.t option ref = ref None
+let get_pool n =
+  match !pool_ref with
+  | Some p when Pool.size p = n -> p
   | _ ->
-    match Sys.getenv_opt "RULE_ENUM_JOBS" with
-    | Some s -> (try max 1 (int_of_string s) with _ -> 1)
-    | None ->
-      try Stdlib.Domain.recommended_domain_count () with _ -> 1
+    let p = Pool.create n in
+    pool_ref := Some p;
+    p
 
 let parallel_filter_map ~num_domains f lst =
   let len = List.length lst in
@@ -405,10 +582,10 @@ let parallel_filter_map ~num_domains f lst =
     let rec split acc = function
       | [] -> List.rev acc
       | rest -> let ch, rem = take chunk_size [] rest in split (ch :: acc) rem in
-    let chunks = split [] lst in
-    let domains = List.map (fun ch ->
-      Stdlib.Domain.spawn (fun () -> List.filter_map f ch)) chunks in
-    List.concat (List.map Stdlib.Domain.join domains)
+    let chunks = Array.of_list (split [] lst) in
+    let pool = get_pool nd in
+    let thunks = Array.map (fun ch () -> List.filter_map f ch) chunks in
+    List.concat (Array.to_list (Pool.run pool thunks))
 
 let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
       ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
@@ -428,6 +605,13 @@ let profile_enabled =
 let prof_label name dt =
   if profile_enabled && dt > 0.01 then
     Printf.eprintf "    [%s] %.3fs\n%!" name dt
+
+let mem_label name =
+  if profile_enabled then begin
+    let s = Gc.quick_stat () in
+    let mb words = float_of_int words *. 8.0 /. 1024.0 /. 1024.0 in
+    Printf.eprintf "    [mem %s] heap=%.1fMB\n%!" name (mb s.heap_words)
+  end
 
 let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       (caps : Enum.caps) ~num_domains ~sym_cmp : 's iter_summary =
@@ -510,7 +694,8 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         List.iteri (fun i g ->
           if !idx = -1 then
             let (rep, _, rep_ex) = List.hd g in
-            if confirm_equiv ~use_smt ~smt_vars dom t t_ex rep rep_ex then idx := i)
+            if confirm_equiv ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+                 dom t t_ex rep rep_ex then idx := i)
           !groups;
         match !idx with
         | -1 -> groups := [triple] :: !groups
@@ -531,7 +716,8 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         let (rep, _, rep_ex) = List.hd tp in
         let same, diff = List.partition (fun (_, tp2) ->
           let (rep2, _, rep2_ex) = List.hd tp2 in
-          confirm_equiv ~use_smt ~smt_vars dom rep rep_ex rep2 rep2_ex) rest in
+          confirm_equiv ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+            dom rep rep_ex rep2 rep2_ex) rest in
         let merged = List.fold_left (fun a (_, tp2) -> a @ tp2) tp same in
         merge_all ((bv, merged) :: acc) diff
     in
@@ -539,27 +725,43 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   in
   let t_kbo_extract = Sys.time () in
   let new_irr_pairs = ref [] in
+  (* Per-iteration cache: anon → list of (orbit_member, kbo_cache).
+     Different source terms in the same bv-group often share an anon
+     (e.g. var-form `a+b` and hole-form `A+B` both reduce to the same
+     anon `A+B`), and hole_permutations + bv-filter + Kbo.cache are pure
+     functions of anon. Caching at iteration scope amortizes them. *)
+  let use_cache =
+    try Sys.getenv "RULE_ENUM_NO_ANON_CACHE" <> "1" with Not_found -> true
+  in
+  let anon_cache = Hashtbl.create 64 in
+  let compute_orbit anon =
+    let anon_bv = Eval.behavior_compiled_arr dom compiled_inputs_arr anon in
+    let orbit = Types.hole_permutations anon in
+    List.filter_map (fun a ->
+      let a_bv =
+        if a == anon then anon_bv
+        else Eval.behavior_compiled_arr dom compiled_inputs_arr a in
+      if a_bv = anon_bv then Some (a, Kbo.cache a) else None) orbit
+  in
+  let orbit_of_anon anon =
+    if not use_cache then compute_orbit anon
+    else match Hashtbl.find_opt anon_cache anon with
+      | Some v -> v
+      | None ->
+        incr anon_distinct;
+        let filtered = compute_orbit anon in
+        Hashtbl.add anon_cache anon filtered;
+        filtered
+  in
   List.iter (fun (_bv, term_triples) ->
-    (* Compute the fully-anonymized form (vars → holes, canonicalize) of
-       each term, then expand to the hole-renaming orbit. With Hole
-       treated as a constP (linear-ordered, NOT renaming-equivalent),
-       orbit members are distinct canonical terms. For commutative ops
-       the orbit members evaluate identically (same anon-bv) — we keep
-       them, so the winner-extraction emits a commutativity rule. For
-       non-commutative ops the orbit members have distinct anon-bvs;
-       we filter them out so no spurious rule is emitted. *)
+    (* The anonymized form `vars_to_holes ∘ canonicalize` plus its hole-
+       renaming orbit determines the winner per bv-group. Orbit members
+       with anon-bv equal to the canonical anon are the universally-
+       equivalent forms; the rest get filtered. *)
     let with_anon = List.concat_map (fun (t, bv, ex) ->
+      incr anon_total;
       let anon = Types.canonicalize (Types.vars_to_holes t) in
-      let anon_bv = Eval.behavior_compiled_arr dom compiled_inputs_arr anon in
-      let orbit = Types.hole_permutations anon in
-      List.filter_map (fun a ->
-        let a_bv =
-          if a == anon then anon_bv
-          else Eval.behavior_compiled_arr dom compiled_inputs_arr a in
-        if a_bv = anon_bv then
-          let a_c = Kbo.cache a in
-          Some (t, bv, ex, a, a_c)
-        else None) orbit)
+      List.map (fun (a, a_c) -> (t, bv, ex, a, a_c)) (orbit_of_anon anon))
       term_triples
     in
     (* Pick the minimum under anon-form KBO; ties broken by compare_total
@@ -648,13 +850,19 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         in
         (* Tier 2 + Tier 3 on the source var-form pair (other_t, w_t).
            If a counterexample comes back, both cells grow. *)
-        let confirms () =
-          confirm_equiv ~use_smt ~smt_vars dom other_t other_ex w_t w_ex in
+        let verdict () =
+          confirm_verdict ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+            dom other_t other_ex w_t w_ex in
         match rule with
-        | Some r when not (Hashtbl.mem kbo_seen r) && confirms () ->
-          Hashtbl.add kbo_seen r ();
-          rs.kbo_rules <- r :: rs.kbo_rules;
-          new_kbo_rules := r :: !new_kbo_rules
+        | Some r when not (Hashtbl.mem kbo_seen r) ->
+          (match verdict () with
+           | Not_equiv -> ()
+           | Unproven -> rs.skipped_rules <- r :: rs.skipped_rules
+           | (Proven | Assumed) as v ->
+             Hashtbl.add kbo_seen r ();
+             rs.kbo_rules <- r :: rs.kbo_rules;
+             new_kbo_rules := r :: !new_kbo_rules;
+             if v = Assumed then rs.assumed_rules <- r :: rs.assumed_rules)
         | _ -> ()
       end) with_anon)
     groups;
@@ -681,10 +889,13 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
   let mh = match max_holes with Some n -> n | None -> max_vcs in
   { max_vars = mv; max_holes = mh; max_vcs }
 
-let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domains
-      ?(use_smt = false) ?(use_smt_forced = false)
+let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
+      ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
+      ?unknown_inputs
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
+  Types.clear_cons_cache ();
+  (match unknown_inputs with Some n -> unknown_extra_inputs := max 0 n | None -> ());
   let caps = make_caps ?max_vars ?max_holes ~max_vcs () in
   let default_max = match max_size with Some m -> m | None -> 12 in
   let workers = resolve_num_workers num_domains in
@@ -695,7 +906,7 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domai
   let inputs = forced_inputs @ random_inputs in
   if inputs = [] && not use_smt then
     failwith "Algorithm.run: no inputs and SMT disabled";
-  let rs = create ~use_smt ~use_smt_forced inputs in
+  let rs = create ~use_smt ~use_smt_forced ~assume_unproven inputs in
   let results = ref [] in let n = ref 1 in let continue = ref true in
   while !continue && !n <= default_max do
     let summary = run_iteration dom rs !n caps
@@ -703,7 +914,7 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ -> ()) ?num_domai
         ~sym_cmp:dom.Domain.sym_compare in
     if summary.new_size_rules = [] && summary.new_kbo_rules = [] && summary.new_irreducibles = [] then
       continue := false
-    else (on_iteration summary; results := summary :: !results; incr n)
+    else (on_iteration rs summary; results := summary :: !results; incr n)
   done; (rs, List.rev !results)
 
 (* Expose resolution for callers that need to print the actual job count. *)

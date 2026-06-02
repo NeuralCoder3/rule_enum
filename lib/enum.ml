@@ -40,10 +40,10 @@ let prepare_skeleton t =
   in let t' = go t in (t', !next_v, !next_h)
 
 let rec shift_slots ~v_shift ~h_shift = function
-  | Types.Var v -> Types.Var (v + v_shift)
-  | Types.Hole n -> Types.Hole (n + h_shift)
+  | Types.Var v -> Types.mk_var (v + v_shift)
+  | Types.Hole n -> Types.mk_hole (n + h_shift)
   | Types.Node (f, args) ->
-    Types.Node (f, List.map (shift_slots ~v_shift ~h_shift) args)
+    Types.mk_node f (List.map (shift_slots ~v_shift ~h_shift) args)
 
 let rec partitions total parts =
   if parts <= 0 then (if total = 0 then [[]] else [])
@@ -102,14 +102,14 @@ let apply_partitions ~v_part ~h_part ~caps ~max_v_slots ~max_h_slots t =
     | Types.Var slot_id ->
       let b = v_map.(slot_id) in
       let c = v_canon.(b) in
-      if c >= 0 then Types.Var c
-      else (let c = !next_v in incr next_v; v_canon.(b) <- c; Types.Var c)
+      if c >= 0 then Types.mk_var c
+      else (let c = !next_v in incr next_v; v_canon.(b) <- c; Types.mk_var c)
     | Types.Hole slot_id ->
       let b = h_map.(slot_id) in
       let c = h_canon.(b) in
-      if c >= 0 then Types.Hole c
-      else (let c = !next_h in incr next_h; h_canon.(b) <- c; Types.Hole c)
-    | Types.Node (f, args) -> Types.Node (f, List.map go args)
+      if c >= 0 then Types.mk_hole c
+      else (let c = !next_h in incr next_h; h_canon.(b) <- c; Types.mk_hole c)
+    | Types.Node (f, args) -> Types.mk_node f (List.map go args)
   in
   let result = go t in
   if !next_v <= caps.max_vars
@@ -126,11 +126,11 @@ let enumerate_terms_caps (symbols : (string * int * 's) list)
       : 's Types.term list =
   if n = 1 then begin
     let var_leaf = if caps.max_vars >= 1 && caps.max_vcs >= 1
-                   then [Types.Var 0] else [] in
+                   then [Types.mk_var 0] else [] in
     let hole_leaf = if caps.max_holes >= 1 && caps.max_vcs >= 1
-                    then [Types.Hole 0] else [] in
+                    then [Types.mk_hole 0] else [] in
     let consts = List.filter_map (fun (_, ar, s) ->
-      if ar = 0 then Some (Types.Node (s, [])) else None) symbols in
+      if ar = 0 then Some (Types.mk_node s []) else None) symbols in
     var_leaf @ hole_leaf @ consts
   end else
   let by_size = Hashtbl.create 16 in
@@ -156,7 +156,7 @@ let enumerate_terms_caps (symbols : (string * int * 's) list)
     let consts =
       if sz = 1 then
         List.filter_map (fun (_, ar, s) ->
-          if ar = 0 then Some (IrredCopy (Types.Node (s, []), 0, 0))
+          if ar = 0 then Some (IrredCopy (Types.mk_node s [], 0, 0))
           else None) symbols
       else []
     in
@@ -176,15 +176,15 @@ let enumerate_terms_caps (symbols : (string * int * 's) list)
         let next_v = ref 0 and next_h = ref 0 in
         let args = List.map (function
           | FreshVarSlot ->
-            let id = !next_v in incr next_v; Types.Var id
+            let id = !next_v in incr next_v; Types.mk_var id
           | FreshHoleSlot ->
-            let id = !next_h in incr next_h; Types.Hole id
+            let id = !next_h in incr next_h; Types.mk_hole id
           | IrredCopy (skel, nv, nh) ->
             let v_shift = !next_v in next_v := !next_v + nv;
             let h_shift = !next_h in next_h := !next_h + nh;
             shift_slots ~v_shift ~h_shift skel)
           choices
-        in let term = Types.Node (sym, args) in
+        in let term = Types.mk_node sym args in
         let total_v = !next_v and total_h = !next_h in
         (* Cap total slot count to keep set_partitions tractable. *)
         if total_v + total_h <= 6 then

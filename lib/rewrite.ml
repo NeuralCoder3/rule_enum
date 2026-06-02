@@ -119,7 +119,7 @@ let rec norm_bottom_tracked ~sym_cmp ~index t = match t with
     let args' = List.map (fun a ->
       let (a', c) = norm_bottom_tracked ~sym_cmp ~index a in
       if c then any_changed := true; a') args in
-    let t' = Types.Node (f, args') in
+    let t' = Types.mk_node f args' in
     (match try_rewrite sym_cmp index t' with
      | None -> (t', !any_changed)
      | Some t'' ->
@@ -163,7 +163,7 @@ let normalize_canonical_or_skip ~sym_cmp ~index t =
       let args' = List.map (fun a ->
         let (a', c) = go a in
         if c then any_changed := true; a') args in
-      let t' = Types.Node (f, args') in
+      let t' = Types.mk_node f args' in
       if Types.size t' < in_sz then raise Size_reduced;
       match try_rewrite sym_cmp index t' with
       | None -> (t', !any_changed)
