@@ -98,6 +98,17 @@ let test_match_var_const () =
   (* Reverse LHS does the OPPOSITE: matches reverse target, not canonical. *)
   assert (Types.match_var_const int_sym_cmp lhs10 reverse_target |> Option.is_some);
   assert (Types.match_var_const int_sym_cmp lhs10 canon_target = None);
+  (* TERMINATION GUARD: distinct holes require STRICTLY ordered images, so
+     a commutativity rule (Hole1+Hole0 -> Hole0+Hole1) must NOT match a
+     target with EQUAL images like c+c — otherwise it would rewrite c+c to
+     c+c forever. Equal images fail the strict `<` order for both LHS
+     orientations. *)
+  let equal_target = i_node i_plus [h 7; h 7] in
+  assert (Types.match_var_const int_sym_cmp lhs01 equal_target = None);
+  assert (Types.match_var_const int_sym_cmp lhs10 equal_target = None);
+  let equal_var_target = i_node i_plus [v 'a'; v 'a'] in
+  assert (Types.match_var_const int_sym_cmp lhs01 equal_var_target = None);
+  assert (Types.match_var_const int_sym_cmp lhs10 equal_var_target = None);
   (* Hole pattern accepts Var as image (with order-preservation). *)
   let var_canon   = i_node i_plus [v 'a'; v 'b'] in
   let var_reverse = i_node i_plus [v 'b'; v 'a'] in
@@ -126,6 +137,27 @@ let test_match_var_const () =
   assert (Types.match_var_const int_sym_cmp lhs3
             (i_node i_minus [i_node i_plus [h 0; h 1]; h 2]) = None);
   Printf.printf "  match_var_const: OK\n"
+
+(* Termination: a commutativity rule applied by the rewrite engine must
+   reach a fixpoint, never loop. With a non-strict order it would rewrite
+   c+c -> c+c indefinitely. We normalize equal-, reverse-, and
+   canonical-argument targets and assert each terminates with the right
+   result. (If the strict-order guard regressed, this test would hang.) *)
+let test_commutativity_terminates () =
+  let cmp = int_sym_cmp in
+  let s = Domain_int.string_of_symbol in
+  let comm = (i_node i_plus [h 1; h 0], i_node i_plus [h 0; h 1]) in (* B+A -> A+B *)
+  let norm t = fst (Rewrite.normalize_with_index ~sym_cmp:cmp [comm] t) in
+  (* equal images: must be a fixpoint (no rewrite). *)
+  let cc = norm (i_node i_plus [h 5; h 5]) in
+  assert (Types.to_string s cc = "(A+A)");
+  (* reverse order: rewritten once to canonical, then fixpoint. *)
+  let dc = norm (i_node i_plus [h 6; h 5]) in
+  assert (Types.to_string s dc = "(A+B)");
+  (* canonical: untouched. *)
+  let cd = norm (i_node i_plus [h 5; h 6]) in
+  assert (Types.to_string s cd = "(A+B)");
+  Printf.printf "  commutativity terminates (no c+c loop): OK\n"
 
 let test_kbo_var_count () =
   let cmp = int_sym_cmp in
@@ -391,6 +423,104 @@ let test_rule_set_semantic_closure () =
   let m2 = normalize (i_node i_minus [h 0; h 1]) in
   assert (not (Types.term_eq int_sym_cmp m1 m2));
   Printf.printf "  rule-set semantic closure: OK\n"
+
+(* Regression: a NON-commutative operator must never get a commutativity
+   rule, even when its random behavior is degenerate. For 32-bit shifts,
+   full-range random shift amounts are almost always >= width, so B<<A and
+   A<<B are both 0 on every random input and share a behavior vector — the
+   hole-orbit machinery would emit `<<(B,A) -> <<(A,B)` unless the actual
+   rule pair is SMT-verified. SMT refutes it (e.g. A=2^32-1, B=0), so the
+   rule must be absent; genuine commutativity (+, *, &, |) must remain. *)
+let test_no_shift_commutativity () =
+  Random.init 7;
+  let rs, _ = Algorithm.run ~max_size:4 Domain_bv.bv_domain ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~use_smt:true in
+  let s = Domain_bv.string_of_symbol in
+  let strs = List.map (fun (l, r) ->
+    Types.to_string s l ^ " -> " ^ Types.to_string s r)
+    (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules) in
+  let has x = List.mem x strs in
+  assert (not (has "<<(B,A) -> <<(A,B)"));
+  assert (not (has ">>(B,A) -> >>(A,B)"));
+  (* Genuine commutativity survives. *)
+  assert (has "(B+A) -> (A+B)");
+  assert (has "(B*A) -> (A*B)");
+  (* And every emitted rule is genuinely sound (SMT-equivalent). *)
+  let smt_vars = List.init 3 Types.var_name @ List.init 3 Types.hole_name in
+  List.iter (fun (l, r) ->
+    match Smt.check_equiv Domain_bv.bv_domain smt_vars l r with
+    | Smt.Equivalent -> ()
+    | _ -> Printf.eprintf "  UNSOUND bv rule: %s -> %s\n"
+             (Types.to_string s l) (Types.to_string s r); assert false)
+    (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules);
+  Printf.printf "  no shift commutativity (bv 32-bit): OK\n"
+
+(* Soundness gate: with SMT enabled, EVERY rule the algorithm emits must
+   be a genuine equivalence (SMT proves LHS ≡ RHS). Runs the synthesizer
+   across all domains and a range of caps — including the configs that
+   previously produced unsound rules (bv 32-bit shifts, mixed var/hole) —
+   and checks each emitted rule with the SMT solver.
+
+   Scope note: this is asserted for `--smt` runs only. Random-only mode
+   has no soundness guarantee — e.g. for 32-bit bv shifts, B<<A and A<<B
+   are both 0 on every full-range random input, so random alone cannot
+   tell them apart and CAN emit unsound rules. `test_random_only_bv_unsound`
+   pins that as a known limitation. *)
+let smt_check_all_rules (type s) ~name (dom : (s, _) Domain.t) ~max_size
+      ~max_vcs ~max_holes ~seed =
+  Random.init seed;
+  let rs, _ = Algorithm.run ~max_size dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs ~max_holes ~use_smt:true in
+  let k = max max_vcs max_holes in
+  let smt_vars = List.init k Types.var_name @ List.init k Types.hole_name in
+  let sym = dom.Domain.sym_to_string in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let bad = List.filter (fun (l, r) ->
+    match Smt.check_equiv dom smt_vars l r with
+    | Smt.Equivalent -> false
+    | Smt.CounterExample _ | Smt.Unknown -> true) rules in
+  (* `Unknown` would be a false positive (a sound rule SMT can't prove in
+     time); configs are small enough that all rules resolve, and any
+     Unknown is reported and fails so it is never silently ignored. *)
+  if bad <> [] then begin
+    Printf.eprintf "  UNSOUND/unprovable rules in %s:\n" name;
+    List.iter (fun (l, r) -> Printf.eprintf "    %s -> %s\n"
+      (Types.to_string sym l) (Types.to_string sym r)) bad;
+    assert false
+  end;
+  List.length rules
+
+let test_all_rules_smt_sound () =
+  let n =
+    smt_check_all_rules ~name:"int (max_holes=0)" int_dom
+      ~max_size:6 ~max_vcs:3 ~max_holes:0 ~seed:1
+    + smt_check_all_rules ~name:"int (max_holes=3)" int_dom
+        ~max_size:6 ~max_vcs:3 ~max_holes:3 ~seed:1
+    + smt_check_all_rules ~name:"bool" bool_dom
+        ~max_size:5 ~max_vcs:2 ~max_holes:2 ~seed:1
+    + smt_check_all_rules ~name:"bv (32-bit, max_holes=3)"
+        Domain_bv.bv_domain ~max_size:4 ~max_vcs:3 ~max_holes:3 ~seed:1
+    + smt_check_all_rules ~name:"bv (8-bit)"
+        Domain_bv.bv_domain ~max_size:4 ~max_vcs:3 ~max_holes:0 ~seed:1
+  in
+  Printf.printf "  all emitted rules SMT-sound (--smt): OK (%d rules across 5 configs)\n" n
+
+(* Pins the known limitation: random-only verification on 32-bit bv is
+   NOT sound, because full-range random shift amounts are almost always
+   >= width, making B<<A and A<<B both 0 on every sample. If a future
+   change (e.g. shift-aware random sampling, or always-on SMT) makes
+   random-only bv sound, this test trips and should be updated. *)
+let test_random_only_bv_unsound () =
+  Random.init 7;
+  let rs, _ = Algorithm.run ~max_size:4 Domain_bv.bv_domain ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~max_holes:0 ~use_smt:false in
+  let smt_vars = List.init 3 Types.var_name @ List.init 3 Types.hole_name in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let n_unsound = List.length (List.filter (fun (l, r) ->
+    Smt.check_equiv Domain_bv.bv_domain smt_vars l r <> Smt.Equivalent) rules) in
+  assert (n_unsound > 0);
+  Printf.printf "  random-only bv unsound (known limitation): OK (%d/%d rules unsound)\n"
+    n_unsound (List.length rules)
 
 (* Regression: a Hole and a Var are distinct concepts. Tests that lump
    them together (e.g., "canonicalize renumbers by first occurrence")
@@ -1035,6 +1165,7 @@ let test_all_bool_inputs () =
 let () = Printf.printf "Running tests...\n";
   test_canonicalize (); test_distinct_vcs (); test_size (); test_has_hole ();
   test_kbo (); test_match_subst (); test_match_var_const ();
+  test_commutativity_terminates ();
   test_kbo_var_count (); test_rewrite (); test_rewrite_hole_priority ();
   test_eval_int (); test_eval_bool (); test_eval_hole ();
   test_enum_size1 (); test_enum_with_holes (); test_enum_caps_separated ();
@@ -1043,6 +1174,9 @@ let () = Printf.printf "Running tests...\n";
   test_commutativity_rule ();
   test_no_equivalent_irreducibles ();
   test_rule_set_semantic_closure ();
+  test_no_shift_commutativity ();
+  test_all_rules_smt_sound ();
+  test_random_only_bv_unsound ();
   test_tier2_cross_eval_helper ();
   test_smt_random_equivalence ();
   test_safe_mode_no_assumed ();

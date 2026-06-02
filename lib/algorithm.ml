@@ -213,7 +213,13 @@ type 's iter_summary = {
   new_size_rules : 's Types.rule list;
   new_kbo_rules  : 's Types.rule list;
   new_irreducibles : 's Types.term list;
+  (* Rules emitted/skipped this iteration on UNPROVEN equivalence (SMT
+     Unknown, passed random). `new_assumed` were added (non-safe mode);
+     `new_skipped` were declined (safe mode). *)
+  new_assumed : 's Types.rule list;
+  new_skipped : 's Types.rule list;
   total_size_rules : int;  total_kbo_rules : int;  total_irreducible : int;
+  total_assumed : int;  total_skipped : int;
   time_total : float;  time_enum : float;  time_process : float;
   time_norm : float;  time_eval : float;  time_match : float;
   time_apply : float;  time_group : float;
@@ -617,6 +623,17 @@ let mem_label name =
 let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       (caps : Enum.caps) ~num_domains ~sym_cmp : 's iter_summary =
   let t_start = Sys.time () in
+  (* Snapshot the unproven-equivalence logs so we can report what THIS
+     iteration added/skipped, not just the cumulative totals. *)
+  let assumed_before = rs.assumed_rules in
+  let skipped_before = rs.skipped_rules in
+  let suffix_added prev cur =
+    (* cur is `new @ prev` (rules prepended); return just the new prefix. *)
+    let extra = List.length cur - List.length prev in
+    if extra <= 0 then [] else
+      let rec take n = function x :: xs when n > 0 -> x :: take (n-1) xs | _ -> [] in
+      take extra cur
+  in
   let enumerated =
     Enum.enumerate_terms_caps dom.Domain.all_symbols (irreducibles rs) n caps in
   let t_enum = Sys.time () -. t_start in
@@ -692,15 +709,29 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       let groups = ref [[first]] in
       List.iter (fun ((t, _, t_ex) as triple) ->
         let idx = ref (-1) in
+        let unproven_rep = ref None in
         List.iteri (fun i g ->
           if !idx = -1 then
             let (rep, _, rep_ex) = List.hd g in
-            if confirm_equiv ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
-                 dom t t_ex rep rep_ex then idx := i)
+            match confirm_verdict ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+                    dom t t_ex rep rep_ex with
+            | Proven | Assumed -> idx := i
+            | Unproven -> if !unproven_rep = None then unproven_rep := Some rep
+            | Not_equiv -> ())
           !groups;
         match !idx with
-        | -1 -> groups := [triple] :: !groups
-        | i -> groups := List.mapi (fun j g -> if j = i then triple :: g else g) !groups)
+        | i when i >= 0 -> groups := List.mapi (fun j g -> if j = i then triple :: g else g) !groups
+        | _ ->
+          (* t stays in its own subgroup. If it was kept separate from a
+             random-equivalent rep only because SMT couldn't decide
+             (Unproven, safe mode), log the declined equation (oriented by
+             KBO) so it surfaces alongside the assumed rules. *)
+          (match !unproven_rep with
+           | Some rep ->
+             let r = if Kbo.compare_total sym_cmp rep t <= 0 then (t, rep) else (rep, t) in
+             rs.skipped_rules <- r :: rs.skipped_rules
+           | None -> ());
+          groups := [triple] :: !groups)
         rest;
       List.map (fun g -> (bv, g)) !groups)
     groups
@@ -849,14 +880,20 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
             then Some (other_anon, w_anon)
             else None
         in
-        (* Tier 2 + Tier 3 on the source var-form pair (other_t, w_t).
-           If a counterexample comes back, both cells grow. *)
-        let verdict () =
-          confirm_verdict ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
-            dom other_t other_ex w_t w_ex in
+        (* Confirm the ACTUAL rule pair (lhs, rhs), not the source terms.
+           Orbit members share a source (`other_t = w_t`), so checking the
+           sources is a trivially-true self-comparison; the emitted rule
+           may relate different hole orientations (e.g. the bogus
+           Shl(B,A) -> Shl(A,B), whose sides agree only on a degenerate
+           all-zero random sample). Verifying lhs ≡ rhs directly lets SMT
+           reject such non-equivalences. *)
+        let _ = other_ex in let _ = w_ex in
         match rule with
-        | Some r when not (Hashtbl.mem kbo_seen r) ->
-          (match verdict () with
+        | Some (lhs, rhs as r) when not (Hashtbl.mem kbo_seen r) ->
+          let v = confirm_verdict ~assume_unproven:rs.assume_unproven
+                    ~use_smt ~smt_vars dom
+                    lhs (new_examples ()) rhs (new_examples ()) in
+          (match v with
            | Not_equiv -> ()
            | Unproven -> rs.skipped_rules <- r :: rs.skipped_rules
            | (Proven | Assumed) as v ->
@@ -875,8 +912,12 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   { size = n; enumerated = List.length enumerated;
     new_size_rules = List.rev !new_size_rules; new_kbo_rules = List.rev !new_kbo_rules;
     new_irreducibles = List.rev !new_irreducibles;
+    new_assumed = List.rev (suffix_added assumed_before rs.assumed_rules);
+    new_skipped = List.rev (suffix_added skipped_before rs.skipped_rules);
     total_size_rules = List.length rs.size_rules; total_kbo_rules = List.length rs.kbo_rules;
     total_irreducible = List.length rs.behaviors;
+    total_assumed = List.length rs.assumed_rules;
+    total_skipped = List.length rs.skipped_rules;
     time_total = Sys.time () -. t_start; time_enum = t_enum;
     time_process = t_process; time_norm = 0.; time_eval = 0.; time_match = 0.;
     time_apply = 0.; time_group = 0.;

@@ -27,7 +27,20 @@ let write_iteration ?oc_header ?oc_report sym_str (s : 's Rule_enum.Algorithm.it
      if nkr > 0 then begin Printf.fprintf oc "  KBO-simplifying rules: %d\n" nkr;
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
          (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_kbo_rules end;
-     Printf.fprintf oc "  Cumulative: SR=%d KR=%d IR=%d\n\n" s.total_size_rules s.total_kbo_rules s.total_irreducible;
+     (* Unproven equivalences (SMT Unknown, passed random) decided this
+        iteration: assumed = added on random confidence; skipped = declined
+        under safe mode. *)
+     if s.new_assumed <> [] then begin
+       Printf.fprintf oc "  Assumed (unproven, added): %d\n" (List.length s.new_assumed);
+       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
+         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_assumed end;
+     if s.new_skipped <> [] then begin
+       Printf.fprintf oc "  Skipped (unproven, not added): %d\n" (List.length s.new_skipped);
+       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
+         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_skipped end;
+     Printf.fprintf oc "  Cumulative: SR=%d KR=%d IR=%d assumed=%d skipped=%d\n\n"
+       s.total_size_rules s.total_kbo_rules s.total_irreducible
+       s.total_assumed s.total_skipped;
      flush oc | None -> ())
 
 let write_footer oc_report sym_str total_elapsed (rs : _) =
@@ -96,15 +109,22 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~forced_inputs:forced ~use_smt ~use_smt_forced ~assume_unproven
       ?unknown_inputs
       ~on_iteration:(fun rs s ->
+        let open Rule_enum.Algorithm in
         let elapsed = Unix.gettimeofday () -. start_time in
         Printf.printf "Size %d  [%.1fs / %.1fs]  enum=%d  +SR=%d  +KR=%d  +IR=%d  total: SR=%d KR=%d IR=%d\n%!"
-          s.Rule_enum.Algorithm.size elapsed s.Rule_enum.Algorithm.time_total
-          s.Rule_enum.Algorithm.enumerated
-          (List.length s.Rule_enum.Algorithm.new_size_rules)
-          (List.length s.Rule_enum.Algorithm.new_kbo_rules)
-          (List.length s.Rule_enum.Algorithm.new_irreducibles)
-          s.Rule_enum.Algorithm.total_size_rules s.Rule_enum.Algorithm.total_kbo_rules
-          s.Rule_enum.Algorithm.total_irreducible;
+          s.size elapsed s.time_total s.enumerated
+          (List.length s.new_size_rules) (List.length s.new_kbo_rules)
+          (List.length s.new_irreducibles)
+          s.total_size_rules s.total_kbo_rules s.total_irreducible;
+        (* Surface unproven-equivalence decisions as they happen, not just
+           in the final report. *)
+        let na = List.length s.new_assumed and nk = List.length s.new_skipped in
+        if na > 0 then
+          Printf.printf "         +%d assumed (unproven, passed random, added) — total %d\n%!"
+            na s.total_assumed;
+        if nk > 0 then
+          Printf.printf "         +%d skipped (unproven, passed random, not added: --safe-mode) — total %d\n%!"
+            nk s.total_skipped;
         write_iteration ?oc_header:oc_stats ?oc_report sym_str s;
         write_outputs rs) in
   let total_elapsed = Unix.gettimeofday () -. start_time in
