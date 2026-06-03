@@ -829,6 +829,12 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   in
   let t_kbo_extract = Sys.time () in
   let new_irr_pairs = ref [] in
+  (* Candidate KBO rules collected during the (pure) orbit/winner pass.
+     Confirmation is deferred so each distinct (lhs, rhs) pair is verified
+     exactly once: the orbit expansion proposes the same pair from many
+     groups/orbit members (~half are duplicates), and unconfirmed duplicates
+     would otherwise pile up in skipped_rules / re-run SMT. *)
+  let candidate_rules = ref [] in
   (* Per-iteration cache: anon → list of (orbit_member, kbo_cache).
      Different source terms in the same bv-group often share an anon
      (e.g. var-form `a+b` and hole-form `A+B` both reduce to the same
@@ -886,6 +892,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
           first rest
     in
     let (w_t, w_bv, w_ex, w_anon, _) = winner in
+    let w_c = Kbo.cache w_t in   (* constant per group — hoisted out of the inner loop below *)
     new_irreducibles := w_t :: !new_irreducibles;
     new_irr_pairs := (w_t, w_bv, w_ex) :: !new_irr_pairs;
     (* For each non-winner: emit a rule.
@@ -940,7 +947,6 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       in
       if not same_as_winner then begin
         let other_c = Kbo.cache other_t in
-        let w_c = Kbo.cache w_t in
         let rule =
           match Kbo.kbo_cached sym_cmp w_c other_c with
           | Kbo.Less when var_set_le w_t other_t && holes_subset_le w_t other_t ->
@@ -960,24 +966,37 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
            all-zero random sample). Verifying lhs ≡ rhs directly lets SMT
            reject such non-equivalences. *)
         let _ = other_ex in let _ = w_ex in
-        match rule with
-        | Some (lhs, rhs as r) when not (Hashtbl.mem kbo_seen r) ->
-          let v = confirm_verdict ~assume_unproven:rs.assume_unproven
-                    ~use_smt ~smt_vars dom
-                    lhs (new_examples ()) rhs (new_examples ()) in
-          (match v with
-           | Not_equiv -> ()
-           | Unproven -> rs.skipped_rules <- r :: rs.skipped_rules
-           | (Proven | Assumed) as v ->
-             Hashtbl.add kbo_seen r ();
-             rs.kbo_rules <- r :: rs.kbo_rules;
-             new_kbo_rules := r :: !new_kbo_rules;
-             if v = Assumed then rs.assumed_rules <- r :: rs.assumed_rules)
-        | _ -> ()
+        (match rule with Some r -> candidate_rules := r :: !candidate_rules | None -> ())
       end) with_anon)
     groups;
-  prof_label (Printf.sprintf "kbo-extract (%d groups)" (List.length groups))
+  prof_label (Printf.sprintf "kbo-extract orbit (%d groups)" (List.length groups))
     (Sys.time () -. t_kbo_extract);
+  (* Deduplicate candidate pairs: confirm each distinct (lhs, rhs) once,
+     dropping pairs already committed in a prior subpass/iteration
+     (`kbo_seen`). `List.rev` restores left-to-right encounter order. *)
+  let t_confirm = Sys.time () in
+  let cand_rules =
+    let seen = Hashtbl.create (max 16 (List.length !candidate_rules)) in
+    List.filter (fun r ->
+      if Hashtbl.mem kbo_seen r || Hashtbl.mem seen r then false
+      else (Hashtbl.add seen r (); true))
+      (List.rev !candidate_rules)
+  in
+  List.iter (fun (lhs, rhs as r) ->
+    let v = confirm_verdict ~assume_unproven:rs.assume_unproven
+              ~use_smt ~smt_vars dom
+              lhs (new_examples ()) rhs (new_examples ()) in
+    match v with
+    | Not_equiv -> ()
+    | Unproven -> rs.skipped_rules <- r :: rs.skipped_rules
+    | (Proven | Assumed) as v ->
+      Hashtbl.add kbo_seen r ();
+      rs.kbo_rules <- r :: rs.kbo_rules;
+      new_kbo_rules := r :: !new_kbo_rules;
+      if v = Assumed then rs.assumed_rules <- r :: rs.assumed_rules)
+    cand_rules;
+  prof_label (Printf.sprintf "kbo-extract confirm (%d unique rules)" (List.length cand_rules))
+    (Sys.time () -. t_confirm);
   Progress.finish ();
   let sorted = List.sort (fun (a,_,_) (b,_,_) -> Kbo.compare_total sym_cmp a b) !new_irr_pairs in
   List.iter (fun entry -> rs.behaviors <- entry :: rs.behaviors) (List.rev sorted);

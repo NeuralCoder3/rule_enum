@@ -216,12 +216,16 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
 let () =
   let domain_name = ref "int" in
   let max_vcs = ref 3 in
-  (* -1 means "follow max_vcs" for max_vars; max_holes defaults to 0
-     because we enumerate var-only and synthesize constP rules post-hoc
-     from var-form equivalences (much smaller enumeration). Set --max-holes
-     to a positive value to enumerate hole-leaf terms too. *)
+  (* -1 means "follow max_vcs". Both max_vars and max_holes default to
+     max_vcs so the CLI matches Algorithm.run's own default and produces a
+     COMPLETE rule set. Setting --max-holes 0 enumerates var-only and
+     synthesizes constP rules post-hoc from var-form equivalences — much
+     cheaper, but INCOMPLETE: constP reassociation rules whose canonical
+     LHS leads with the larger hole (e.g. (B*(A*B)) -> (A*(B*B))) are never
+     produced, because vars_to_holes of a first-occurrence-canonical var
+     term can only ever put the first-occurring hole at H0. *)
   let max_vars = ref (-1) in
-  let max_holes = ref 0 in
+  let max_holes = ref (-1) in
   let random_inputs = ref 100 in
   let use_full = ref false in let max_size = ref 7 in let output_file = ref "" in
   let stats_file = ref "" in let use_smt = ref false in
@@ -240,7 +244,7 @@ let () =
     ("--domain", Arg.Set_string domain_name, " int|bv|bool  Evaluation domain (default: int)");
     ("--max-vcs", Arg.Set_int max_vcs, " K  Sum bound: distinct vars + distinct holes (default: 3)");
     ("--max-vars", Arg.Set_int max_vars, " N  Distinct-var cap (default: same as --max-vcs)");
-    ("--max-holes", Arg.Set_int max_holes, " N  Distinct-hole cap (default: same as --max-vcs); set 0 to disable hole rules");
+    ("--max-holes", Arg.Set_int max_holes, " N  Distinct-hole cap (default: same as --max-vcs); set 0 for fast var-only enumeration (INCOMPLETE: omits some constP reassociation rules)");
     ("--max-consts", Arg.Set_int max_holes, " N  Alias for --max-holes");
     ("--random-inputs", Arg.Set_int random_inputs, " N  Random inputs, 0 = none (default: 100)");
     ("--full", Arg.Set use_full, " Exhaustive enumeration (bool: all 2^n combos)");
@@ -277,9 +281,15 @@ let () =
   let mv = if !max_vars < 0 then !max_vcs else !max_vars in
   let mh = if !max_holes < 0 then !max_vcs else !max_holes in
   let unknown_inputs = if !smt_unknown_inputs < 0 then None else Some !smt_unknown_inputs in
-  (* Sanity: with max_holes=0 (default), enumeration produces only
-     var-only terms; constP rules are still emitted post-hoc from var
-     equivalences when var-KBO is Incomparable. *)
+  if mh = 0 && not !eval then
+    Printf.eprintf
+      "warning: --max-holes 0 (var-only) yields an INCOMPLETE rule set; some constP reassociation rules (e.g. (B*(A*B)) -> (A*(B*B))) will be missing. Use --max-holes %d for a complete set.\n%!"
+      !max_vcs;
+  (* With max_holes>0 (the default) hole-leaf terms are enumerated, so
+     constP terms appear directly and group by behavior (holes canonicalize
+     by sorted-id), giving a complete set of reassociation/commutativity
+     rules. With max_holes=0 enumeration is var-only and constP rules are
+     synthesized post-hoc from var equivalences — faster but incomplete. *)
   match !domain_name with
   | "int" -> run_with Rule_enum.Domain_int.int_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh

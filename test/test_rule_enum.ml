@@ -424,6 +424,78 @@ let test_rule_set_semantic_closure () =
   assert (not (Types.term_eq int_sym_cmp m1 m2));
   Printf.printf "  rule-set semantic closure: OK\n"
 
+(* Regression for the user-reported bug: nested commutative products with
+   a REPEATED hole (e.g. `B*(A*B)`) failed to normalize. Every syntactic
+   orientation of a commutative/associative product must normalize to ONE
+   form. This specifically guards the case the size-3 closure test above
+   misses (nesting + repeated leaves) and the case the all-terms confluence
+   test would only catch in hole-enabled mode. Times and Plus are both AC;
+   we check the A.B^2, A^2.B, and A.B.C orientation families. *)
+let mul a b = i_node i_times [a; b]
+let pl  a b = i_node i_plus  [a; b]
+
+let test_constp_product_confluence () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:5 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~max_holes:3 ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let cmp = int_sym_cmp in
+  let str = Types.to_string Domain_int.string_of_symbol in
+  let nf t = Types.canonicalize (fst (Rewrite.normalize_with_index ~sym_cmp:cmp rules t)) in
+  (* Every term in `terms` is universally equal; assert one shared normal form. *)
+  let assert_confluent label terms =
+    match terms with
+    | [] -> ()
+    | t0 :: _ ->
+      let nf0 = nf t0 in
+      List.iter (fun t ->
+        let n = nf t in
+        if not (Types.term_eq cmp n nf0) then begin
+          Printf.eprintf
+            "  NON-CONFLUENT (%s): %s -> %s   vs   %s -> %s\n"
+            label (str t0) (str nf0) (str t) (str n);
+          assert false
+        end) terms
+  in
+  let families op =       (* op = mul or pl, both AC *)
+    let a = h 0 and b = h 1 and c = h 2 in
+    (* A.B^2 (= one single, one doubled) — all 6 orientations *)
+    [ "A.B^2", [ op b (op a b); op a (op b b); op b (op b a);
+                 op (op a b) b; op (op b a) b; op (op b b) a ];
+    (* A^2.B *)
+      "A^2.B", [ op a (op a b); op a (op b a); op b (op a a);
+                 op (op a a) b; op (op a b) a; op (op b a) a ];
+    (* A.B.C — all distinct, the 6 right-nested perms + 6 left-nested *)
+      "A.B.C", [ op a (op b c); op a (op c b); op b (op a c); op b (op c a);
+                 op c (op a b); op c (op b a);
+                 op (op a b) c; op (op a c) b; op (op b a) c; op (op b c) a;
+                 op (op c a) b; op (op c b) a ] ]
+  in
+  List.iter (fun (lbl, ts) -> assert_confluent ("* " ^ lbl) ts) (families mul);
+  List.iter (fun (lbl, ts) -> assert_confluent ("+ " ^ lbl) ts) (families pl);
+  Printf.printf "  constP product confluence: OK\n"
+
+(* Pins the documented incompleteness of var-only mode (--max-holes 0):
+   `B*(A*B)` does NOT reach the same normal form as `A*(B*B)`, because
+   vars_to_holes of a first-occurrence-canonical var term can never produce
+   the LHS `*(H1,*(H0,H1))`. If this ever starts converging, var-only mode
+   became complete — update the CLI warning and docs. The COMPLETE mode
+   (above) must always converge. *)
+let test_var_only_mode_incompleteness () =
+  Random.init 42;
+  let rs, _ = Algorithm.run ~max_size:5 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:3 ~max_holes:0 ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let cmp = int_sym_cmp in
+  let nf t = Types.canonicalize (fst (Rewrite.normalize_with_index ~sym_cmp:cmp rules t)) in
+  let bab = mul (h 1) (mul (h 0) (h 1)) in   (* B*(A*B) *)
+  let abb = mul (h 0) (mul (h 1) (h 1)) in   (* A*(B*B) *)
+  let converged = Types.term_eq cmp (nf bab) (nf abb) in
+  if converged then
+    Printf.printf "  var-only incompleteness: NOTE — B*(A*B) now converges (var-only became complete?)\n"
+  else
+    Printf.printf "  var-only incompleteness: confirmed (B*(A*B) stuck; use --max-holes>0)\n"
+
 (* Regression: a NON-commutative operator must never get a commutativity
    rule, even when its random behavior is degenerate. For 32-bit shifts,
    full-range random shift amounts are almost always >= width, so B<<A and
@@ -1191,6 +1263,8 @@ let () = Printf.printf "Running tests...\n";
   test_commutativity_rule ();
   test_no_equivalent_irreducibles ();
   test_rule_set_semantic_closure ();
+  test_constp_product_confluence ();
+  test_var_only_mode_incompleteness ();
   test_no_shift_commutativity ();
   test_all_rules_smt_sound ();
   test_random_only_bv_unsound ();
