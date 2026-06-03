@@ -168,6 +168,68 @@ let tier3_unknown_fallback ~assume_unproven (dom : ('s, 'a) Domain.t) ~smt_vars 
       end
   in scan extra
 
+(* Exhaustive equivalence over a small finite domain. Enumerates every
+   assignment of the domain's value set to the distinct leaves of t1/t2 and
+   checks the two terms agree on all of them — an EXACT oracle (sound and
+   complete) that needs no Z3. Returns None when unavailable (infinite
+   domain) or the assignment space `|values|^|leaves|` exceeds the budget,
+   in which case the caller falls back to SMT. Pure: no shared state, safe
+   to run from worker domains. *)
+(* Max assignment space (|values|^|leaves|) we'll exhaustively enumerate.
+   Pairs whose space exceeds this return None ("too big") instead of being
+   enumerated — crucial for speed: a pair spanning many distinct leaves
+   (e.g. a var-term vs a hole-term that collided in a bv-bucket) would
+   otherwise enumerate a huge space. Genuine equivalences span ≤ max_vcs
+   leaves, so as long as |values|^max_vcs fits here they are always
+   decided; None therefore implies non-equivalence (or an already-reducible
+   constant), which callers treat accordingly. *)
+let exhaustive_max_combos = 300_000
+let exhaustive_calls = ref 0
+
+let distinct_leaf_names t1 t2 =
+  let tbl = Hashtbl.create 8 in
+  let rec go = function
+    | Types.Var v -> Hashtbl.replace tbl (Types.var_name v) ()
+    | Types.Hole n -> Hashtbl.replace tbl (Types.hole_name n) ()
+    | Types.Node (_, args) -> List.iter go args
+  in go t1; go t2;
+  Hashtbl.fold (fun k () acc -> k :: acc) tbl []
+
+(* Exact equivalence by exhaustive evaluation over the domain's finite value
+   set, applied to the union of t1/t2's distinct leaves. Short-circuits on
+   the first counterexample. Returns Some true / Some false when decided,
+   or None when the assignment space is too large (caller falls back).
+   Pure: safe to run in workers. *)
+let exhaustive_equiv (dom : ('s, 'a) Domain.t) t1 t2 : bool option =
+  match dom.Domain.values with
+  | None -> None
+  | Some vals ->
+    let names = Array.of_list (distinct_leaf_names t1 t2) in
+    let vals = Array.of_list vals in
+    let nv = Array.length vals and d = Array.length names in
+    let rec pow acc i =
+      if acc > exhaustive_max_combos then acc
+      else if i = 0 then acc else pow (acc * nv) (i - 1) in
+    if d > 0 && pow 1 d > exhaustive_max_combos then None
+    else begin
+      incr exhaustive_calls;
+      let idx = Array.make (max d 1) 0 in
+      let equal = ref true and continue = ref true in
+      while !continue && !equal do
+        let assign =
+          Array.to_list (Array.mapi (fun i name -> (name, vals.(idx.(i)))) names) in
+        if not (dom.Domain.equal (Eval.eval dom assign t1) (Eval.eval dom assign t2))
+        then equal := false;
+        (* odometer over d digits, base nv (d=0 ⇒ single ground check) *)
+        let rec inc i =
+          if i < 0 then continue := false
+          else if idx.(i) + 1 < nv then idx.(i) <- idx.(i) + 1
+          else (idx.(i) <- 0; inc (i - 1)) in
+        inc (d - 1)
+      done;
+      Some !equal
+    end
+
 (* Tier 3: invoke SMT after Tier 2 has confirmed cell agreement.
    On CounterExample: convert the assignment via dom.int_to_val,
    evaluate both terms on it, append (input, v) to BOTH cells. *)
@@ -195,12 +257,27 @@ let tier3_smt ~assume_unproven (dom : ('s, 'a) Domain.t) ~smt_vars t1 (ex1 : 'a 
    - Tier 3 (SMT) only fires if Tier 2 agrees; counterexamples grow both cells.
    Without SMT, agreement on the cells counts as Proven (random is the
    only oracle in that mode). *)
-let confirm_verdict ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
+(* `smt_ok`: when false (parallel/worker context), NEVER fall through to
+   Z3 — its global memory manager serializes and the OCaml binding crashes
+   across domains. Workers only run the pure exhaustive oracle; an
+   undecided result (None) is treated as Not_equiv, which is sound: an
+   undecided pair must span more than max_vcs distinct leaves (the budget
+   covers everything up to that), and a genuine equivalence never does. *)
+let confirm_verdict ?(smt_ok = true) ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
   incr tier_calls;
   if not (tier2_cross_eval dom t1 ex1 t2 ex2) then
     (incr tier2_short_circuit; Not_equiv)
-  else if not use_smt then Proven
-  else tier3_smt ~assume_unproven dom ~smt_vars t1 ex1 t2 ex2
+  else
+    (* Exact exhaustive oracle when the domain is small enough (e.g. bv4):
+       decisive and Z3-free. Falls back to SMT (or random, sans --smt) on
+       larger domains where the assignment space is too big. *)
+    match exhaustive_equiv dom t1 t2 with
+    | Some true -> Proven
+    | Some false -> Not_equiv
+    | None ->
+      if not smt_ok then Not_equiv
+      else if not use_smt then Proven
+      else tier3_smt ~assume_unproven dom ~smt_vars t1 ex1 t2 ex2
 
 (* Boolean view for call sites that only need equiv/not-equiv (grouping,
    merging). Only Proven and Assumed count as equivalent; Unproven (safe
@@ -213,13 +290,74 @@ let confirm_equiv ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
 (* O(n) group via Hashtbl keyed by the bv. The `cmp` arg is unused — we
    rely on Hashtbl's structural hashing / equality (bv keys are
    `'a list` of equality-comparable values). *)
+(* Group values by an exact key. The keys here are behaviour vectors —
+   arrays of length = #inputs (often hundreds). OCaml's default Hashtbl
+   hashes only ~10 nodes, so vectors sharing a prefix all collide into one
+   bucket and every insert pays a full O(len) structural-equality scan;
+   at ~5·10^5 vectors that dominated the whole iteration (minutes). Here we
+   bucket by a STRONG hash (`hash_param` over the full vector) into an
+   int-keyed table, then split each bucket by exact `=`. Hashing is O(len)
+   once per value; equality runs only on genuine hash collisions. *)
 let group_by _cmp key_of_value values =
-  let h = Hashtbl.create (max 16 (List.length values)) in
+  let h : (int, ('k * 'v list ref) list ref) Hashtbl.t =
+    Hashtbl.create (max 16 (List.length values)) in
   List.iter (fun v ->
     let k = key_of_value v in
-    let prev = try Hashtbl.find h k with Not_found -> [] in
-    Hashtbl.replace h k (v :: prev)) values;
-  Hashtbl.fold (fun k vs acc -> (k, vs) :: acc) h []
+    let hsh = Hashtbl.hash_param 2000 2000 k in
+    let bucket = match Hashtbl.find_opt h hsh with
+      | Some b -> b
+      | None -> let b = ref [] in Hashtbl.add h hsh b; b in
+    match List.find_opt (fun (k', _) -> k' = k) !bucket with
+    | Some (_, items) -> items := v :: !items
+    | None -> bucket := (k, ref [v]) :: !bucket) values;
+  Hashtbl.fold (fun _ bucket acc ->
+    List.fold_left (fun acc (k, items) -> (k, !items) :: acc) acc !bucket) h []
+
+(* Per-term EXACT signature for a small finite (`fully_exhaustive`) domain:
+   the truth-table of the term over all assignments to its own distinct
+   leaves, in canonical (sorted-name) order, as an 'a array. Two terms with
+   the same leaves AND the same table are provably equivalent; the array
+   length encodes the leaf count. Length = |values|^(distinct leaves), which
+   is ≤ |values|^max_vcs (canonical terms have ≤ max_vcs distinct leaves) and
+   so within the fully_exhaustive budget. This replaces the random behaviour
+   vector as a SUBGROUP key, turning the O(n·subgroups) pairwise merge into
+   an O(n) hash split. *)
+let exact_table (dom : ('s, 'a) Domain.t) t : 'a array =
+  match dom.Domain.values with
+  | None -> [||]
+  | Some vals ->
+    let names = Array.of_list (List.sort compare (distinct_leaf_names t t)) in
+    let varr = Array.of_list vals in
+    let nv = Array.length varr and d = Array.length names in
+    let total = let r = ref 1 in (for _ = 1 to d do r := !r * nv done); !r in
+    let out = Array.make (max 1 total) (dom.Domain.int_to_val 0) in
+    let idx = Array.make (max d 1) 0 in
+    let pos = ref 0 and continue = ref true in
+    while !continue do
+      let assign =
+        Array.to_list (Array.mapi (fun i name -> (name, varr.(idx.(i)))) names) in
+      out.(!pos) <- Eval.eval dom assign t; incr pos;
+      if d = 0 then continue := false
+      else begin
+        let rec inc i =
+          if i < 0 then continue := false
+          else if idx.(i) + 1 < nv then idx.(i) <- idx.(i) + 1
+          else (idx.(i) <- 0; inc (i - 1)) in
+        inc (d - 1)
+      end
+    done;
+    Array.sub out 0 !pos
+
+(* Exactly split a behaviour-vector bucket into true equivalence classes by
+   hashing each term's `exact_table` — O(n), no SMT, no pairwise. Two terms
+   land together iff they are equal over the same leaves, which is exact for
+   the common case. (Equivalents that mention DIFFERENT leaf sets — e.g. two
+   distinct constant-0 forms — are not merged here, but those are reducible
+   and so don't survive as candidates. A pairwise reconcile would be exact
+   but is O(classes²) and quadratically slow on big buckets.) *)
+let exact_subgroups (dom : ('s, 'a) Domain.t) term_triples =
+  group_by () (fun (t, _, _) -> exact_table dom t) term_triples
+  |> List.map snd
 
 (* Detailed per-iteration counts surfaced in --info mode. *)
 type iter_info = {
@@ -629,6 +767,29 @@ let parallel_filter_map ~num_domains f lst =
     let thunks = Array.map (fun ch () -> List.filter_map f ch) chunks in
     List.concat (Array.to_list (Pool.run pool thunks))
 
+(* Order-preserving parallel map over the pool. Used to parallelize rule
+   confirmation when the equivalence oracle is the pure exhaustive one
+   (`fully_exhaustive`): unlike Z3 (which serializes on its global memory
+   manager), exhaustive eval has no shared state, so this scales. `f` must
+   be pure apart from benign stat-counter increments. *)
+let parallel_map ~num_domains f lst =
+  let len = List.length lst in
+  let nd = num_domains in
+  if nd <= 1 || len < 256 then List.map f lst
+  else
+    let chunk_size = (len + nd - 1) / nd in
+    let rec take n acc = function
+      | [] -> (List.rev acc, [])
+      | rest when n <= 0 -> (List.rev acc, rest)
+      | x :: xs -> take (n - 1) (x :: acc) xs in
+    let rec split acc = function
+      | [] -> List.rev acc
+      | rest -> let ch, rem = take chunk_size [] rest in split (ch :: acc) rem in
+    let chunks = Array.of_list (split [] lst) in
+    let pool = get_pool nd in
+    let thunks = Array.map (fun ch () -> List.map f ch) chunks in
+    List.concat (Array.to_list (Pool.run pool thunks))
+
 (* Per-subpass decision tally for --info: (reducible, size, kbo, replace,
    dup_skip, candidate). `reducible` = enumerated terms that a rule
    rewrote (so process_term dropped them); the rest are the decision
@@ -723,6 +884,23 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
      random inputs are also present — random just prefilters which
      candidate pairs need SMT. *)
   let use_smt = rs.use_smt in
+  (* True when the pure exhaustive oracle can DECIDE every genuine
+     equivalence, so confirmation never needs Z3 and can be parallelized.
+     A genuine equivalence spans ≤ max_vcs distinct leaves, hence
+     |values|^max_vcs evaluations — if that fits the budget, equivalent
+     pairs are always fully decided; non-equivalent pairs short-circuit or
+     (rarely) come back undecided, which the parallel path treats as
+     Not_equiv. So workers never touch Z3. *)
+  let fully_exhaustive =
+    match dom.Domain.values with
+    | None -> false
+    | Some vals ->
+      let nv = List.length vals in
+      let rec pow acc i =
+        if acc > exhaustive_max_combos then acc
+        else if i = 0 then acc else pow (acc * nv) (i - 1) in
+      pow 1 caps.max_vcs <= exhaustive_max_combos
+  in
   let smt_vars = if not use_smt then [] else
     (* Declare names for BOTH var and hole IDs up to max_vcs.
        Even with max_holes=0 in enumeration, post-group anon-form rules
@@ -776,9 +954,11 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
      sample); the combined check splits these into distinct subgroups.
      Every SMT counterexample is appended to both terms' example cells. *)
   let groups = if not rs.use_smt then groups else begin
-    Progress.start ~label:(Printf.sprintf "size %d subgrouping (smt)" n)
+    Progress.start
+      ~label:(Printf.sprintf "size %d subgrouping%s" n
+                (if fully_exhaustive then "" else " (smt)"))
       ~total:(List.length groups) ();
-    List.concat_map (fun (bv, term_triples) ->
+    let subgroup_one (bv, term_triples) =
       Progress.tick ();
       match term_triples with [] -> [] | first :: rest ->
       let groups = ref [[first]] in
@@ -788,7 +968,11 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         List.iteri (fun i g ->
           if !idx = -1 then
             let (rep, _, rep_ex) = List.hd g in
-            match confirm_verdict ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
+            (* smt_ok=false ⇔ run on the worker pool (fully_exhaustive):
+               must not reach Z3. Harmless when sequential (None won't
+               occur for in-budget genuine equivalences). *)
+            match confirm_verdict ~smt_ok:(not fully_exhaustive)
+                    ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
                     dom t t_ex rep rep_ex with
             | Proven | Assumed -> idx := i
             | Unproven -> if !unproven_rep = None then unproven_rep := Some rep
@@ -808,8 +992,25 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
            | None -> ());
           groups := [triple] :: !groups)
         rest;
-      List.map (fun g -> (bv, g)) !groups)
-    groups
+      List.map (fun g -> (bv, g)) !groups
+    in
+    (* On a small finite domain, split each bv-bucket EXACTLY via per-term
+       truth-tables: O(n) hash + cheap rep reconcile, instead of the
+       O(n·subgroups) pairwise merge (which dominated bv4 at size 8 because
+       the 200-input random vector over-groups, producing huge buckets that
+       fan out into many subgroups). Pure ⇒ parallelizable. *)
+    let subgroup_exact (bv, term_triples) =
+      Progress.tick ();
+      List.map (fun g -> (bv, g)) (exact_subgroups dom term_triples)
+    in
+    (* Groups are independent; with the pure exhaustive oracle (no Z3, no
+       Unproven ⇒ no shared skipped_rules write, and each candidate's cell
+       lives in exactly one bv-group) the per-group work parallelizes. With
+       SMT it must stay sequential. Order is preserved either way. *)
+    let f = if fully_exhaustive then subgroup_exact else subgroup_one in
+    List.concat
+      (if fully_exhaustive then parallel_map ~num_domains f groups
+       else List.map f groups)
   end
   in
   (* Cross-bv merging: cells let us cross-eval reps from different bvs
@@ -989,13 +1190,26 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       else (Hashtbl.add seen r (); true))
       (List.rev !candidate_rules)
   in
-  Progress.start ~label:(Printf.sprintf "size %d verifying rules (smt)" n)
+  Progress.start
+    ~label:(Printf.sprintf "size %d verifying rules%s" n
+              (if fully_exhaustive then "" else " (smt)"))
     ~total:(List.length cand_rules) ();
-  List.iter (fun (lhs, rhs as r) ->
+  let confirm_one (lhs, rhs as r) =
     Progress.tick ();
-    let v = confirm_verdict ~assume_unproven:rs.assume_unproven
-              ~use_smt ~smt_vars dom
-              lhs (new_examples ()) rhs (new_examples ()) in
+    (r, confirm_verdict ~smt_ok:(not fully_exhaustive)
+          ~assume_unproven:rs.assume_unproven
+          ~use_smt ~smt_vars dom lhs (new_examples ()) rhs (new_examples ()))
+  in
+  (* When `fully_exhaustive`, confirmation is pure (no Z3) and parallelizes
+     cleanly; otherwise SMT can be reached, which must stay single-threaded
+     (Z3's global memory manager serializes and the binding misbehaves
+     across domains). Verdicts merge SEQUENTIALLY in candidate order, so the
+     committed rule set is independent of worker scheduling. *)
+  let verdicts =
+    if fully_exhaustive then parallel_map ~num_domains confirm_one cand_rules
+    else List.map confirm_one cand_rules
+  in
+  List.iter (fun (r, v) ->
     match v with
     | Not_equiv -> ()
     | Unproven -> rs.skipped_rules <- r :: rs.skipped_rules
@@ -1004,7 +1218,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       rs.kbo_rules <- r :: rs.kbo_rules;
       new_kbo_rules := r :: !new_kbo_rules;
       if v = Assumed then rs.assumed_rules <- r :: rs.assumed_rules)
-    cand_rules;
+    verdicts;
   prof_label (Printf.sprintf "kbo-extract confirm (%d unique rules)" (List.length cand_rules))
     (Sys.time () -. t_confirm);
   Progress.finish ();

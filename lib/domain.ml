@@ -5,6 +5,12 @@ type ('s, 'a) t = {
      (valid shift amounts) with full-range ones. The caller seeds Random
      (Random.init / self_init) so benchmarks stay reproducible. *)
   sample    : unit -> 'a;
+  (* The complete finite value set, when small enough to enumerate (e.g.
+     bv with a tiny width, or bool). `None` for infinite/large domains
+     (int, wide bv). When present, equivalence of two terms over ≤ a few
+     distinct leaves can be decided EXACTLY by exhaustive evaluation —
+     faster than Z3 on small domains, and pure (so parallelizable). *)
+  values    : 'a list option;
   generate_inputs : int -> int -> (string * 'a) list list;
   to_string : 'a -> string;
   equal     : 'a -> 'a -> bool;

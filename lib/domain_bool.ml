@@ -28,6 +28,7 @@ let bool_domain : (symbol, bool) Domain.t = {
     | _ -> failwith "bad arity for bool op"
   );
   Domain.sample = sample;
+  Domain.values = Some [false; true];
   Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_bool;
   Domain.equal = Bool.equal;

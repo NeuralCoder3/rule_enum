@@ -28,6 +28,7 @@ let int_domain : (symbol, int) Domain.t = {
     | _ -> failwith "bad arity for int op"
   );
   Domain.sample = sample;
+  Domain.values = None;   (* infinite domain — equivalence needs SMT *)
   Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;

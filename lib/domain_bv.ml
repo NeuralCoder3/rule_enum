@@ -73,6 +73,12 @@ let bv_domain : (symbol, int) Domain.t = {
     | _ -> failwith "bad arity for bv op"
   );
   Domain.sample = sample;
+  (* Enumerable value set only for tiny widths, where exhaustive evaluation
+     over a rule's distinct leaves is an exact, Z3-free equivalence oracle.
+     Capped so the list itself stays small; the per-check combo budget
+     (values^leaves) is enforced separately. *)
+  Domain.values =
+    (if bv_width <= 10 then Some (List.init (1 lsl bv_width) norm) else None);
   Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;
