@@ -103,6 +103,7 @@ def validate_logic(n: int, c0: int, c1: int, c2: int):
 def estimate(n, c0,c1,c2):
     c = math.sqrt(c1+2*math.sqrt(c0*c2))*(c0*c2)**(0.25)/(2*c2*math.sqrt(math.pi))
     return c*(c1+2*math.sqrt(c0*c2))**(n)/(n**(1.5))
+    # (sqrt(b+sqrt(a*c))*(a*c)**0.25)/(2*c*sqrt(pi))*((b+2*sqrt(a*c))**n)/(n**1.5)
 
 def estimate_str(c0,c1,c2):
     c = math.sqrt(c1+2*math.sqrt(c0*c2))*(c0*c2)**(0.25)/(2*c2*math.sqrt(math.pi))

@@ -15,10 +15,11 @@ dune build --profile=release bin/main.exe && ./_build/default/bin/main.exe $@
 # rm output2/bv_*_v1.*
 # --smt-unknown-inputs
 # --safe-mode
-# export VERSION=2;export RULE_ENUM_BV_WIDTH=4;./run_opt.sh --domain bv --max-vcs 3 --max-size 100 --random-inputs 100 --smt --stats output2/bv4_vcs3_v$VERSION.csv --output output2/bv4_vcs3_v$VERSION.txt --rule-output output2/bv4_vcs3_v$VERSION.rules --irred-output output2/bv4_vcs3_v$VERSION.irs --jobs 4 | tee -a output2/bv4_vcs3_v$VERSION.log
+# export VERSION=8;export RULE_ENUM_BV_WIDTH=4;./run_opt.sh --domain bv --max-vcs 3 --max-size 100 --random-inputs 100 --smt --stats output2/bv4_vcs3_v$VERSION.csv --output output2/bv4_vcs3_v$VERSION.txt --rule-output output2/bv4_vcs3_v$VERSION.rules --irred-output output2/bv4_vcs3_v$VERSION.irs --jobs 4 --progress | tee -a output2/bv4_vcs3_v$VERSION.log
 
-# bool takes 1328.5s for full
-# export VERSION=2;./run_opt.sh --domain bool --max-vcs 3 --max-size 100 --full --random-inputs 0 --stats output2/bool_vcs3_v$VERSION.csv --output output2/bool_vcs3_v$VERSION.txt --rule-output output2/bool_vcs3_v$VERSION.rules --irred-output output2/bool_vcs3_v$VERSION.irs --jobs 4 | tee -a output2/bool_vcs3_v$VERSION.log
+# bool
+# Final [1004.6s]: SR=255269  KR=699  IR=256, T20
+# export VERSION=4;./run_opt.sh --domain bool --max-vcs 3 --max-size 100 --full --random-inputs 0 --stats output2/bool_vcs3_v$VERSION.csv --output output2/bool_vcs3_v$VERSION.txt --rule-output output2/bool_vcs3_v$VERSION.rules --irred-output output2/bool_vcs3_v$VERSION.irs --jobs 4  --progress | tee -a output2/bool_vcs3_v$VERSION.log
 
 
 
@@ -26,5 +27,4 @@ dune build --profile=release bin/main.exe && ./_build/default/bin/main.exe $@
 #   echo '(b+a)
 #   (B*(A*B))
 #   ((a+b)+c)' > input.txt
-#   rule_enum --domain int --eval --rules-input rules.txt \
-#       --terms-input input.txt --output normalized.txt
+#   ./run_opt.sh --domain bv --eval --rules-input output2/bv4_vcs3_v8.rules --terms-input input.txt --output normalized.txt
