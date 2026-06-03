@@ -17,6 +17,8 @@ let all_symbols = [
   ("~", 1, Not); ("&", 2, And); ("|", 2, Or); ("^", 2, Xor);
 ]
 
+let sample () = Random.bool ()
+
 let bool_domain : (symbol, bool) Domain.t = {
   Domain.eval_op = (fun sym args -> match sym, args with
     | Not, [a] -> not a
@@ -25,17 +27,8 @@ let bool_domain : (symbol, bool) Domain.t = {
     | Xor, [a; b] -> a <> b
     | _ -> failwith "bad arity for bool op"
   );
-  Domain.generate_inputs = (fun num_inputs k ->
-    (* Caller is responsible for seeding (Random.self_init or Random.init);
-       deterministic seeds enable reproducible benchmarks. *)
-    let var_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'a' + i))) in
-    let hole_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'A' + i))) in
-    let names = var_names @ hole_names in
-    List.init num_inputs (fun _ ->
-      List.map (fun v -> (v, Random.bool ())) names)
-  );
+  Domain.sample = sample;
+  Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_bool;
   Domain.equal = Bool.equal;
   Domain.compare = Bool.compare;

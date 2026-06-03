@@ -2,7 +2,11 @@ open Z3
 
 type result = Equivalent | CounterExample of (string * int) list | Unknown
 
-let ctx = Z3.mk_context []
+(* Lazily created: with SMT disabled (use_smt=false) `check_equiv` is never
+   called, so no Z3 context is ever allocated — the solver/AST machinery
+   stays untouched. (libz3 is still dynamically linked, but no Z3 work
+   runs.) Forcing is memoized, so repeated `Lazy.force` is cheap. *)
+let the_ctx = lazy (Z3.mk_context [])
 
 (* Per-query wall-clock cap (ms). Bitvector queries (multiplication,
    shifts) can make Z3 diverge for minutes on a single (lhs, rhs) pair;
@@ -17,6 +21,7 @@ let timeout_ms =
   | None -> 1000
 
 let solver () =
+  let ctx = Lazy.force the_ctx in
   let s = Solver.mk_solver ctx None in
   (if timeout_ms > 0 then begin
     let p = Z3.Params.mk_params ctx in
@@ -29,7 +34,7 @@ let rec encode (dom : ('s, 'a) Domain.t) vars = function
   | Types.Var v -> List.assoc (Types.var_name v) vars
   | Types.Hole n -> List.assoc (Types.hole_name n) vars
   | Types.Node (f, args) ->
-    dom.Domain.encode_op ctx f (List.map (encode dom vars) args)
+    dom.Domain.encode_op (Lazy.force the_ctx) f (List.map (encode dom vars) args)
 
 (* Extract an OCaml int from a Z3 model value. `Expr.to_string` is not
    safe to parse: Z3 prints integers as "5" / "(- 5)" and bitvectors as
@@ -55,6 +60,7 @@ let trace_slow =
   | None -> None
 
 let check_equiv (dom : ('s, 'a) Domain.t) slot_names t1 t2 =
+  let ctx = Lazy.force the_ctx in
   let decls = List.map (fun n ->
     (n, Z3.Expr.mk_const_s ctx n (dom.Domain.smt_sort ctx))) slot_names in
   let vars = List.map (fun (n, e) -> (n, e)) decls in

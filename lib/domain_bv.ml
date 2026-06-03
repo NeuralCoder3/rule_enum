@@ -37,6 +37,25 @@ let bv_mask = (1 lsl bv_width) - 1
    overflowed 63 bits — matching Z3's modular bitvector arithmetic. *)
 let norm x = x land bv_mask
 
+(* Full-range value in [0, 2^bv_width): built from 30-bit chunks since
+   Random.bits caps at 30 bits. *)
+let rand_bv () =
+  (Random.bits () lxor (Random.bits () lsl 30) lxor (Random.bits () lsl 60))
+  land bv_mask
+
+(* Custom sampler: a MIXTURE of full-range and small values. Full-range
+   alone almost never exercises shifts — a random `b` is < bv_width (a
+   meaningful shift amount) with probability ~bv_width/2^bv_width, which is
+   negligible at width 32, so `<<`/`>>` collapse to 0 on essentially every
+   sample and their algebraic identities are never probed. We therefore
+   draw, with probability 1/2, a small value in [0, 2*bv_width) (covers all
+   valid shift amounts and small magnitudes; capped at the domain size for
+   tiny widths), and otherwise a full-range value. 0/1/all-ones fall out of
+   the small bucket and full range naturally. *)
+let small_bound = min (bv_mask + 1) (2 * bv_width)
+let sample () =
+  if Random.bool () then Random.int small_bound else rand_bv ()
+
 let bv_domain : (symbol, int) Domain.t = {
   Domain.eval_op = (fun sym args -> match sym, args with
   | Not, [a] -> norm (lnot a)
@@ -53,24 +72,8 @@ let bv_domain : (symbol, int) Domain.t = {
   | Or, [a; b] -> norm (a lor b)
     | _ -> failwith "bad arity for bv op"
   );
-  Domain.generate_inputs = (fun num_inputs k ->
-    (* Caller is responsible for seeding (Random.self_init or Random.init);
-       deterministic seeds enable reproducible benchmarks. Values span the
-       full [0, 2^bv_width) range (built from 30-bit chunks since
-       Random.int caps at 2^30) so random testing exercises the whole
-       bitvector domain, not just small magnitudes. *)
-    let rand_bv () =
-      (Random.bits () lxor (Random.bits () lsl 30) lxor (Random.bits () lsl 60))
-      land bv_mask
-    in
-    let var_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'a' + i))) in
-    let hole_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'A' + i))) in
-    let names = var_names @ hole_names in
-    List.init num_inputs (fun _ ->
-      List.map (fun v -> (v, rand_bv ())) names)
-  );
+  Domain.sample = sample;
+  Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;
   Domain.compare = Int.compare;

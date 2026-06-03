@@ -775,8 +775,11 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
      groupings (different functions that happen to agree on the random
      sample); the combined check splits these into distinct subgroups.
      Every SMT counterexample is appended to both terms' example cells. *)
-  let groups = if not rs.use_smt then groups else
+  let groups = if not rs.use_smt then groups else begin
+    Progress.start ~label:(Printf.sprintf "size %d subgrouping (smt)" n)
+      ~total:(List.length groups) ();
     List.concat_map (fun (bv, term_triples) ->
+      Progress.tick ();
       match term_triples with [] -> [] | first :: rest ->
       let groups = ref [[first]] in
       List.iter (fun ((t, _, t_ex) as triple) ->
@@ -807,6 +810,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         rest;
       List.map (fun g -> (bv, g)) !groups)
     groups
+  end
   in
   (* Cross-bv merging: cells let us cross-eval reps from different bvs
      and only invoke SMT when Tier 2 agrees. With non-empty random inputs,
@@ -863,7 +867,10 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         Hashtbl.add anon_cache anon filtered;
         filtered
   in
+  Progress.start ~label:(Printf.sprintf "size %d extracting rules" n)
+    ~total:(List.length groups) ();
   List.iter (fun (_bv, term_triples) ->
+    Progress.tick ();
     (* The anonymized form `vars_to_holes ∘ canonicalize` plus its hole-
        renaming orbit determines the winner per bv-group. Orbit members
        with anon-bv equal to the canonical anon are the universally-
@@ -982,7 +989,10 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       else (Hashtbl.add seen r (); true))
       (List.rev !candidate_rules)
   in
+  Progress.start ~label:(Printf.sprintf "size %d verifying rules (smt)" n)
+    ~total:(List.length cand_rules) ();
   List.iter (fun (lhs, rhs as r) ->
+    Progress.tick ();
     let v = confirm_verdict ~assume_unproven:rs.assume_unproven
               ~use_smt ~smt_vars dom
               lhs (new_examples ()) rhs (new_examples ()) in

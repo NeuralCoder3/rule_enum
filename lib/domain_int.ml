@@ -16,6 +16,9 @@ let all_symbols = [
   ("-", 1, UMinus); ("+", 2, Plus); ("-", 2, Minus); ("*", 2, Times);
 ]
 
+(* Small signed values in [-10, 10]. *)
+let sample () = Random.int 21 - 10
+
 let int_domain : (symbol, int) Domain.t = {
   Domain.eval_op = (fun sym args -> match sym, args with
     | Plus, [a; b] -> a + b
@@ -24,19 +27,8 @@ let int_domain : (symbol, int) Domain.t = {
     | UMinus, [a] -> -a
     | _ -> failwith "bad arity for int op"
   );
-  Domain.generate_inputs = (fun num_inputs k ->
-    (* Caller is responsible for seeding (Random.self_init or Random.init);
-       deterministic seeds enable reproducible benchmarks. Generates both
-       var slots (a, b, …) and hole slots (A, B, …) so hole-containing
-       terms can be evaluated. *)
-    let var_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'a' + i))) in
-    let hole_names = List.init k (fun i ->
-      String.make 1 (Char.chr (Char.code 'A' + i))) in
-    let names = var_names @ hole_names in
-    List.init num_inputs (fun _ ->
-      List.map (fun v -> (v, Random.int 21 - 10)) names)
-  );
+  Domain.sample = sample;
+  Domain.generate_inputs = Domain.inputs_of_sampler sample;
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;
   Domain.compare = Int.compare;
