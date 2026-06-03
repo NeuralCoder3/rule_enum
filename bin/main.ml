@@ -77,7 +77,7 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
-      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs =
+      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info =
   let sym_str = dom.Rule_enum.Domain.sym_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
@@ -125,6 +125,21 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
         if nk > 0 then
           Printf.printf "         +%d skipped (unproven, passed random, not added: --safe-mode) — total %d\n%!"
             nk s.total_skipped;
+        if info then begin
+          let i = s.info in
+          Printf.printf
+            "    [info] enum=%d (var=%d hole=%d)  reducible=%d (rewrote)  irreducible-candidates=%d (raw %d)  bv-groups=%d\n%!"
+            s.enumerated i.i_var_only i.i_with_holes i.i_reducible
+            i.i_candidates_dedup i.i_candidates_raw i.i_bv_groups;
+          Printf.printf
+            "    [info] decisions: size-rule=%d kbo-rule=%d replace=%d dup-of-existing=%d\n%!"
+            i.i_size_decisions i.i_kbo_decisions i.i_replace i.i_dup_skip;
+          if use_smt then
+            Printf.printf
+              "    [info] smt-calls=%d  tier2-short-circuit=%d  unknown=%d (refuted=%d, accepted/declined=%d)  counterexamples=%d\n%!"
+              i.i_smt_calls i.i_tier2_short i.i_tier3_unknown i.i_tier3_refuted
+              (i.i_tier3_unknown - i.i_tier3_refuted) i.i_tier3_cex
+        end;
         write_iteration ?oc_header:oc_stats ?oc_report sym_str s;
         write_outputs rs) in
   let total_elapsed = Unix.gettimeofday () -. start_time in
@@ -213,6 +228,7 @@ let () =
   let stats_file = ref "" in let use_smt = ref false in
   let use_smt_forced = ref false in
   let safe_mode = ref false in
+  let info = ref (try Sys.getenv "RULE_ENUM_INFO" = "1" with Not_found -> false) in
   (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
   let smt_unknown_inputs = ref (-1) in
   let rule_output = ref "" in let irred_output = ref "" in
@@ -235,6 +251,7 @@ let () =
     ("--smt", Arg.Set use_smt, " Enable SMT refinement (requires z3 in PATH)");
     ("--smt-forced", Arg.Set use_smt_forced, " Add SMT counterexamples to input set");
     ("--safe-mode", Arg.Set safe_mode, " Do not assume unproven equivalences: when SMT returns Unknown and random can't refute, keep terms distinct (no rule)");
+    ("--info", Arg.Set info, " Print detailed per-iteration counts (reducible/skipped terms, decision breakdown, SMT/tier activity). Also via RULE_ENUM_INFO=1");
     ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
     ("--rule-output", Arg.Set_string rule_output, " FILE  Save rules (one per line) in load-able format");
     ("--irred-output", Arg.Set_string irred_output, " FILE  Save irreducibles (one per line) in load-able format");
@@ -271,6 +288,7 @@ let () =
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
+      ~info:!info
   | "bv" -> run_with Rule_enum.Domain_bv.bv_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
       ~num_domains:!jobs ~domain_name:"bv"
@@ -279,6 +297,7 @@ let () =
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
+      ~info:!info
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
@@ -290,4 +309,5 @@ let () =
       ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
+      ~info:!info
   | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" !domain_name; exit 1

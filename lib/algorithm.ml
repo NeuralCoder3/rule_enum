@@ -208,6 +208,26 @@ let group_by _cmp key_of_value values =
     Hashtbl.replace h k (v :: prev)) values;
   Hashtbl.fold (fun k vs acc -> (k, vs) :: acc) h []
 
+(* Detailed per-iteration counts surfaced in --info mode. *)
+type iter_info = {
+  i_var_only : int;          (* enumerated terms with no holes *)
+  i_with_holes : int;        (* enumerated terms containing a hole *)
+  i_reducible : int;         (* enumerated terms dropped: a rewrite applied *)
+  i_size_decisions : int;    (* candidates that became size-reducing rules *)
+  i_kbo_decisions : int;     (* candidates that became KBO rules *)
+  i_replace : int;           (* candidates that replaced a larger irreducible *)
+  i_dup_skip : int;          (* candidates equal to an existing irreducible *)
+  i_candidates_raw : int;    (* fresh-candidate decisions (pre-dedup) *)
+  i_candidates_dedup : int;  (* distinct candidates fed to grouping *)
+  i_bv_groups : int;         (* behavior-vector groups formed *)
+  (* SMT / tier activity attributable to THIS iteration (deltas). *)
+  i_smt_calls : int;
+  i_tier2_short : int;
+  i_tier3_unknown : int;
+  i_tier3_refuted : int;
+  i_tier3_cex : int;
+}
+
 type 's iter_summary = {
   size : int;  enumerated : int;
   new_size_rules : 's Types.rule list;
@@ -220,6 +240,7 @@ type 's iter_summary = {
   new_skipped : 's Types.rule list;
   total_size_rules : int;  total_kbo_rules : int;  total_irreducible : int;
   total_assumed : int;  total_skipped : int;
+  info : iter_info;
   time_total : float;  time_enum : float;  time_process : float;
   time_norm : float;  time_eval : float;  time_match : float;
   time_apply : float;  time_group : float;
@@ -594,6 +615,27 @@ let parallel_filter_map ~num_domains f lst =
     let thunks = Array.map (fun ch () -> List.filter_map f ch) chunks in
     List.concat (Array.to_list (Pool.run pool thunks))
 
+(* Per-subpass decision tally for --info: (reducible, size, kbo, replace,
+   dup_skip, candidate). `reducible` = enumerated terms that a rule
+   rewrote (so process_term dropped them); the rest are the decision
+   kinds returned. *)
+type subpass_counts = {
+  c_reducible : int; c_size : int; c_kbo : int;
+  c_replace : int; c_dup_skip : int; c_candidate : int;
+}
+
+let count_decisions ~enumerated decisions =
+  let sz = ref 0 and kb = ref 0 and rp = ref 0 and sk = ref 0 and cd = ref 0 in
+  List.iter (function
+    | D_size_rule _ -> incr sz
+    | D_kbo_rule _ -> incr kb
+    | D_replace _ -> incr rp
+    | D_skip -> incr sk
+    | D_candidate _ -> incr cd) decisions;
+  { c_reducible = enumerated - List.length decisions;
+    c_size = !sz; c_kbo = !kb; c_replace = !rp;
+    c_dup_skip = !sk; c_candidate = !cd }
+
 let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
       ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
       ~num_domains ~use_smt ~smt_vars ~sym_cmp enumerated =
@@ -603,8 +645,10 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
             ~norm_index ~behaviors:rs.behaviors
             ~behaviors_by_bv ~use_smt ~sym_cmp in
   let decisions = parallel_filter_map ~num_domains f enumerated in
-  apply_decisions dom rs ~inputs:all_inputs ~size_seen ~kbo_seen
-    ~use_smt ~smt_vars decisions
+  let counts = count_decisions ~enumerated:(List.length enumerated) decisions in
+  let (sr, kr, cands) = apply_decisions dom rs ~inputs:all_inputs
+    ~size_seen ~kbo_seen ~use_smt ~smt_vars decisions in
+  (sr, kr, cands, counts)
 
 let profile_enabled =
   try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false
@@ -627,6 +671,9 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
      iteration added/skipped, not just the cumulative totals. *)
   let assumed_before = rs.assumed_rules in
   let skipped_before = rs.skipped_rules in
+  (* Snapshot global tier counters for per-iteration deltas (--info). *)
+  let smt0 = !tier3_calls and t2sc0 = !tier2_short_circuit in
+  let unk0 = !tier3_unknown and ref0 = !tier3_unknown_refuted and cex0 = !tier3_cex_added in
   let suffix_added prev cur =
     (* cur is `new @ prev` (rules prepended); return just the new prefix. *)
     let extra = List.length cur - List.length prev in
@@ -671,18 +718,19 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let size_seen = make_rule_seen rs.size_rules in
   let kbo_seen = make_rule_seen rs.kbo_rules in
   let t_sp1 = Sys.time () in
-  let sr1, kr1, cands1 = run_subpass dom rs
+  let sr1, kr1, cands1, ct1 = run_subpass dom rs
     ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
     ~num_domains ~use_smt ~smt_vars ~sym_cmp var_only in
   prof_label (Printf.sprintf "subpass1 var (%d)" (List.length var_only)) (Sys.time () -. t_sp1);
   let t_sp2 = Sys.time () in
-  let sr2, kr2, cands2 = run_subpass dom rs
+  let sr2, kr2, cands2, ct2 = run_subpass dom rs
     ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
     ~num_domains ~use_smt ~smt_vars ~sym_cmp with_holes in
   prof_label (Printf.sprintf "subpass2 hole (%d)" (List.length with_holes)) (Sys.time () -. t_sp2);
   let new_size_rules = ref (sr1 @ sr2) in
   let new_kbo_rules = ref (kr1 @ kr2) in
   let candidates = cands1 @ cands2 in
+  let candidates_raw_count = List.length candidates in
   let t_process = Sys.time () -. t_start -. t_enum in
   let new_irreducibles = ref [] in
   let cmp = list_compare dom.Domain.compare in
@@ -693,10 +741,12 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       if Hashtbl.mem seen t then false
       else (Hashtbl.add seen t (); true)) candidates
   in
-  prof_label (Printf.sprintf "dedup (%d cands)" (List.length candidates)) (Sys.time () -. t_dedup);
+  let candidates_dedup_count = List.length candidates in
+  prof_label (Printf.sprintf "dedup (%d cands)" candidates_dedup_count) (Sys.time () -. t_dedup);
   let t_group = Sys.time () in
   let groups = group_by cmp (fun (_, bv, _) -> bv) candidates in
-  prof_label (Printf.sprintf "group_by (%d groups)" (List.length groups)) (Sys.time () -. t_group);
+  let n_bv_groups = List.length groups in
+  prof_label (Printf.sprintf "group_by (%d groups)" n_bv_groups) (Sys.time () -. t_group);
   (* SMT-driven subgrouping: within each bv-bucket, Tier 2 (cross-eval
      on accumulated examples) then Tier 3 (SMT) confirm which terms are
      TRULY equivalent. Random bv may produce false-positive "equivalent"
@@ -918,6 +968,23 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
     total_irreducible = List.length rs.behaviors;
     total_assumed = List.length rs.assumed_rules;
     total_skipped = List.length rs.skipped_rules;
+    info = {
+      i_var_only = List.length var_only;
+      i_with_holes = List.length with_holes;
+      i_reducible = ct1.c_reducible + ct2.c_reducible;
+      i_size_decisions = ct1.c_size + ct2.c_size;
+      i_kbo_decisions = ct1.c_kbo + ct2.c_kbo;
+      i_replace = ct1.c_replace + ct2.c_replace;
+      i_dup_skip = ct1.c_dup_skip + ct2.c_dup_skip;
+      i_candidates_raw = candidates_raw_count;
+      i_candidates_dedup = candidates_dedup_count;
+      i_bv_groups = n_bv_groups;
+      i_smt_calls = !tier3_calls - smt0;
+      i_tier2_short = !tier2_short_circuit - t2sc0;
+      i_tier3_unknown = !tier3_unknown - unk0;
+      i_tier3_refuted = !tier3_unknown_refuted - ref0;
+      i_tier3_cex = !tier3_cex_added - cex0;
+    };
     time_total = Sys.time () -. t_start; time_enum = t_enum;
     time_process = t_process; time_norm = 0.; time_eval = 0.; time_match = 0.;
     time_apply = 0.; time_group = 0.;
