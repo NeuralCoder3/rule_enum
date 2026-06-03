@@ -13,6 +13,10 @@ let symbol_of_string = function
   | "~" -> Not | "&" -> And | "|" -> Or | "^" -> Xor
   | s -> failwith ("Unknown bool symbol: " ^ s)
 
+let all_symbols = [
+  ("~", 1, Not); ("&", 2, And); ("|", 2, Or); ("^", 2, Xor);
+]
+
 let bool_domain : (symbol, bool) Domain.t = {
   Domain.eval_op = (fun sym args -> match sym, args with
     | Not, [a] -> not a
@@ -35,11 +39,11 @@ let bool_domain : (symbol, bool) Domain.t = {
   Domain.to_string = string_of_bool;
   Domain.equal = Bool.equal;
   Domain.compare = Bool.compare;
-  Domain.all_symbols = [
-    ("~", 1, Not); ("&", 2, And); ("|", 2, Or); ("^", 2, Xor);
-  ];
+  Domain.all_symbols = all_symbols;
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.term_to_string = Types.to_string string_of_symbol;
+  Domain.term_of_string = Parse.term_parser all_symbols;
   Domain.int_to_val = (fun n -> n <> 0);
   Domain.smt_sort = (fun ctx -> Z3.Boolean.mk_sort ctx);
   Domain.encode_op = (fun ctx sym args -> match sym, args with

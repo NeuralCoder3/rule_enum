@@ -12,6 +12,10 @@ let string_of_symbol = function
 let symbol_of_string = function
   | "+" -> Plus | "-" -> Minus | "*" -> Times | s -> failwith ("Unknown int symbol: " ^ s)
 
+let all_symbols = [
+  ("-", 1, UMinus); ("+", 2, Plus); ("-", 2, Minus); ("*", 2, Times);
+]
+
 let int_domain : (symbol, int) Domain.t = {
   Domain.eval_op = (fun sym args -> match sym, args with
     | Plus, [a; b] -> a + b
@@ -36,11 +40,11 @@ let int_domain : (symbol, int) Domain.t = {
   Domain.to_string = string_of_int;
   Domain.equal = Int.equal;
   Domain.compare = Int.compare;
-  Domain.all_symbols = [
-    ("-", 1, UMinus); ("+", 2, Plus); ("-", 2, Minus); ("*", 2, Times);
-  ];
+  Domain.all_symbols = all_symbols;
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.term_to_string = Types.to_string string_of_symbol;
+  Domain.term_of_string = Parse.term_parser all_symbols;
   Domain.int_to_val = (fun n -> n);
   Domain.smt_sort = (fun ctx -> Z3.Arithmetic.Integer.mk_sort ctx);
   Domain.encode_op = (fun ctx sym args -> match sym, args with

@@ -742,8 +742,8 @@ let test_low_random_smt_no_unbound () =
 (* Round-trips every term the pretty-printer emits through the
    load-able file format used by --rule-output / --eval. *)
 let test_parse_roundtrip () =
-  let sym_str = Domain_int.string_of_symbol in
-  let decode = Parse.decoder_of_symbols int_dom.Domain.all_symbols in
+  let to_str = int_dom.Domain.term_to_string in
+  let of_str = int_dom.Domain.term_of_string in
   let terms = [
     v 'a';
     h 0;
@@ -756,14 +756,33 @@ let test_parse_roundtrip () =
     i_node i_times [h 1; i_node i_times [h 0; h 1]];
   ] in
   List.iter (fun t ->
-    let s = Types.to_string sym_str t in
-    let t' = Parse.parse_term decode s in
+    let s = to_str t in
+    let t' = of_str s in
     if not (Types.term_eq int_sym_cmp t t') then begin
       Printf.eprintf "  parse roundtrip FAIL: %s\n" s;
-      Printf.eprintf "    reparsed as: %s\n" (Types.to_string sym_str t');
+      Printf.eprintf "    reparsed as: %s\n" (to_str t');
       assert false
     end) terms;
-  Printf.printf "  parse roundtrip: OK (%d terms)\n" (List.length terms)
+  (* The bv domain prints multi-char operators (<<, >>) in prefix form
+     `<<(a,b)`; the domain's term_of_string must read those back. *)
+  let bv = Domain_bv.bv_domain in
+  let n s a = Types.Node (s, a) in
+  let bv_terms = [
+    n Domain_bv.Shl [v 'a'; v 'b'];                              (* <<(a,b) *)
+    n Domain_bv.Shr [h 1; h 0];                                  (* >>(B,A) *)
+    n Domain_bv.Not [n Domain_bv.Shl [v 'a'; h 0]];              (* (~<<(a,A)) *)
+    n Domain_bv.Plus [v 'a'; n Domain_bv.Shr [v 'b'; v 'c']];    (* (a+>>(b,c)) *)
+    n Domain_bv.Or [n Domain_bv.Shl [v 'a'; v 'b']; v 'c'];      (* (<<(a,b)|c) *)
+  ] in
+  List.iter (fun t ->
+    let s = bv.Domain.term_to_string t in
+    let t' = bv.Domain.term_of_string s in
+    if not (Types.term_eq Domain_bv.compare_symbol t t') then begin
+      Printf.eprintf "  bv parse roundtrip FAIL: %s -> %s\n" s (bv.Domain.term_to_string t');
+      assert false
+    end) bv_terms;
+  Printf.printf "  parse roundtrip: OK (%d int + %d bv terms)\n"
+    (List.length terms) (List.length bv_terms)
 
 (* End-to-end: save rules, reload them, normalize the same term with
    both rule sets, get identical results. Locks in the file format and
@@ -774,10 +793,8 @@ let test_save_load_normalize () =
     ~num_random_inputs:100 ~max_vcs:3 in
   let rules_mem = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
   let path = Filename.temp_file "rule_enum_test" ".rules" in
-  let sym_str = Domain_int.string_of_symbol in
-  let decode = Parse.decoder_of_symbols int_dom.Domain.all_symbols in
-  Parse.save_rules sym_str path rules_mem;
-  let rules_loaded = Parse.load_rules decode path in
+  Parse.save_rules int_dom.Domain.term_to_string path rules_mem;
+  let rules_loaded = Parse.load_rules int_dom.Domain.term_of_string path in
   assert (List.length rules_mem = List.length rules_loaded);
   (* Normalize a battery of terms with each rule set. *)
   let probe_terms = [

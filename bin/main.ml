@@ -6,7 +6,7 @@ let write_header oc_header oc_report domain_name max_vcs max_size =
      Printf.fprintf oc "=== Rule Enumeration Results ===\nDomain: %s, max VCs (k): %d, max size: %d\n\n"
        domain_name max_vcs max_size; flush oc | None -> ())
 
-let write_iteration ?oc_header ?oc_report sym_str (s : 's Rule_enum.Algorithm.iter_summary) =
+let write_iteration ?oc_header ?oc_report to_str (s : 's Rule_enum.Algorithm.iter_summary) =
   let open Rule_enum.Algorithm in
   let nsr = List.length s.new_size_rules in let nkr = List.length s.new_kbo_rules in
   let nir = List.length s.new_irreducibles in
@@ -19,31 +19,31 @@ let write_iteration ?oc_header ?oc_report sym_str (s : 's Rule_enum.Algorithm.it
      Printf.fprintf oc "--- Size %d (enumerated %d, %.3fs) ---\n" s.size s.enumerated s.time_total;
      if nir > 0 then begin
       Printf.fprintf oc "  New irreducible: %d\n" nir;
-        List.iter (fun t -> Printf.fprintf oc "    %s\n" (Rule_enum.Types.to_string sym_str t)) s.new_irreducibles
+        List.iter (fun t -> Printf.fprintf oc "    %s\n" (to_str t)) s.new_irreducibles
      end;
      if nsr > 0 then begin Printf.fprintf oc "  Size-reducing rules: %d\n" nsr;
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_size_rules end;
+         (to_str l) (to_str r)) s.new_size_rules end;
      if nkr > 0 then begin Printf.fprintf oc "  KBO-simplifying rules: %d\n" nkr;
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_kbo_rules end;
+         (to_str l) (to_str r)) s.new_kbo_rules end;
      (* Unproven equivalences (SMT Unknown, passed random) decided this
         iteration: assumed = added on random confidence; skipped = declined
         under safe mode. *)
      if s.new_assumed <> [] then begin
        Printf.fprintf oc "  Assumed (unproven, added): %d\n" (List.length s.new_assumed);
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_assumed end;
+         (to_str l) (to_str r)) s.new_assumed end;
      if s.new_skipped <> [] then begin
        Printf.fprintf oc "  Skipped (unproven, not added): %d\n" (List.length s.new_skipped);
        List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) s.new_skipped end;
+         (to_str l) (to_str r)) s.new_skipped end;
      Printf.fprintf oc "  Cumulative: SR=%d KR=%d IR=%d assumed=%d skipped=%d\n\n"
        s.total_size_rules s.total_kbo_rules s.total_irreducible
        s.total_assumed s.total_skipped;
      flush oc | None -> ())
 
-let write_footer oc_report sym_str total_elapsed (rs : _) =
+let write_footer oc_report to_str total_elapsed (rs : _) =
   match oc_report with Some oc ->
     Printf.fprintf oc "=== Final totals (%.1fs) ===\n" total_elapsed;
     Printf.fprintf oc "Size-reducing: %d\nKBO-simplifying: %d\nIrreducible:   %d\n"
@@ -57,7 +57,7 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
     if assumed <> [] then
       Printf.fprintf oc "(SMT could not prove these; accepted on random confidence. Re-run with --safe-mode to exclude them.)\n";
     List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-      (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) assumed;
+      (to_str l) (to_str r)) assumed;
     (* Candidate equivalences skipped in safe mode — SMT returned Unknown,
        random could not refute, and we declined to assume them. *)
     let skipped = List.rev rs.Rule_enum.Algorithm.skipped_rules in
@@ -66,19 +66,19 @@ let write_footer oc_report sym_str total_elapsed (rs : _) =
     if skipped <> [] then
       Printf.fprintf oc "(SMT could not prove these and random could not refute them; not emitted under --safe-mode. Drop --safe-mode, raise --smt-unknown-inputs, or RULE_ENUM_SMT_TIMEOUT_MS to resolve.)\n";
     List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-      (Rule_enum.Types.to_string sym_str l) (Rule_enum.Types.to_string sym_str r)) skipped;
+      (to_str l) (to_str r)) skipped;
     Printf.fprintf oc "\n=== Irreducible terms (by size) ===\n";
     let sorted = List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors
                  |> List.sort (fun a b -> compare (Rule_enum.Types.size a) (Rule_enum.Types.size b))
     in List.iter (fun t -> Printf.fprintf oc "  [size %d] %s\n" (Rule_enum.Types.size t)
-      (Rule_enum.Types.to_string sym_str t)) sorted; flush oc
+      (to_str t)) sorted; flush oc
   | None -> ()
 
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
       ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info =
-  let sym_str = dom.Rule_enum.Domain.sym_to_string in
+  let to_str = dom.Rule_enum.Domain.term_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
   let jobs_str =
@@ -97,10 +97,10 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
      not just appended — an append-only log would keep stale entries. *)
   let write_outputs (rs : (s, 'a) Rule_enum.Algorithm.rule_sets) =
     if rule_output <> "" then
-      Rule_enum.Parse.save_rules sym_str rule_output
+      Rule_enum.Parse.save_rules to_str rule_output
         (rs.Rule_enum.Algorithm.size_rules @ rs.Rule_enum.Algorithm.kbo_rules);
     if irred_output <> "" then
-      Rule_enum.Parse.save_terms sym_str irred_output
+      Rule_enum.Parse.save_terms to_str irred_output
         (List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors)
   in
   let rs, _iters =
@@ -140,7 +140,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
               i.i_smt_calls i.i_tier2_short i.i_tier3_unknown i.i_tier3_refuted
               (i.i_tier3_unknown - i.i_tier3_refuted) i.i_tier3_cex
         end;
-        write_iteration ?oc_header:oc_stats ?oc_report sym_str s;
+        write_iteration ?oc_header:oc_stats ?oc_report to_str s;
         write_outputs rs) in
   let total_elapsed = Unix.gettimeofday () -. start_time in
   Printf.printf "\nFinal [%.1fs]: SR=%d  KR=%d  IR=%d\n%!"
@@ -164,7 +164,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
     Printf.eprintf "Term cons cache: hits=%d  misses=%d  hit-rate=%.1f%%  unique=%d\n%!"
       h m (100.0 *. float_of_int h /. float_of_int (max 1 (h + m))) m
   end;
-  write_footer oc_report sym_str total_elapsed rs;
+  write_footer oc_report to_str total_elapsed rs;
   Option.iter close_out oc_report; Option.iter close_out oc_stats;
   (* Final snapshot guarantees the files exist even if no iteration ran;
      otherwise this just re-confirms the last per-iteration write. *)
@@ -183,11 +183,10 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
 let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
   let module RE = Rule_enum in
   let load (type s) (dom : (s, _) RE.Domain.t) =
-    let sym_str = dom.RE.Domain.sym_to_string in
     let sym_cmp = dom.RE.Domain.sym_compare in
-    let decode = RE.Parse.decoder_of_symbols dom.RE.Domain.all_symbols in
-    let rules = RE.Parse.load_rules decode rules_input in
-    let terms = RE.Parse.load_terms decode terms_input in
+    let of_string = dom.RE.Domain.term_of_string in
+    let rules = RE.Parse.load_rules of_string rules_input in
+    let terms = RE.Parse.load_terms of_string terms_input in
     Printf.printf "Loaded %d rules and %d terms (domain %s)\n%!"
       (List.length rules) (List.length terms) domain_name;
     (* Use `norm_bottom` (no final canonicalize) so the normalized output
@@ -203,7 +202,7 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
     in
     List.iter (fun t ->
       let n = normalize t in
-      Printf.fprintf out "%s\n" (RE.Types.to_string sym_str n)) terms;
+      Printf.fprintf out "%s\n" (dom.RE.Domain.term_to_string n)) terms;
     if output_file <> "" then close_out out;
     Printf.printf "Normalized %d terms%s\n%!" (List.length terms)
       (if output_file <> "" then " to " ^ output_file else "")
