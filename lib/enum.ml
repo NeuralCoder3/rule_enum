@@ -164,7 +164,8 @@ let enumerate_terms_caps (symbols : (string * int * 's) list)
   in
   let seen = Hashtbl.create (1 lsl 17) in let result = ref [] in
   let add t =
-    if not (Hashtbl.mem seen t) then (Hashtbl.add seen t (); result := t :: !result)
+    if not (Hashtbl.mem seen t) then
+      (Hashtbl.add seen t (); Progress.tick (); result := t :: !result)
   in
   List.iter (fun (_, arity, sym) ->
     if arity = 0 then ()  (* Only at size 1, handled in the base case. *)

@@ -77,7 +77,7 @@ let write_footer oc_report to_str total_elapsed (rs : _) =
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
-      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info =
+      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info ~progress =
   let to_str = dom.Rule_enum.Domain.term_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
@@ -107,7 +107,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
     Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand
       ~max_vcs ~max_vars ~max_holes ~num_domains:effective_jobs
       ~forced_inputs:forced ~use_smt ~use_smt_forced ~assume_unproven
-      ?unknown_inputs
+      ?unknown_inputs ~progress
       ~on_iteration:(fun rs s ->
         let open Rule_enum.Algorithm in
         let elapsed = Unix.gettimeofday () -. start_time in
@@ -228,6 +228,7 @@ let () =
   let use_smt_forced = ref false in
   let safe_mode = ref false in
   let info = ref (try Sys.getenv "RULE_ENUM_INFO" = "1" with Not_found -> false) in
+  let progress = ref false in
   (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
   let smt_unknown_inputs = ref (-1) in
   let rule_output = ref "" in let irred_output = ref "" in
@@ -251,6 +252,7 @@ let () =
     ("--smt-forced", Arg.Set use_smt_forced, " Add SMT counterexamples to input set");
     ("--safe-mode", Arg.Set safe_mode, " Do not assume unproven equivalences: when SMT returns Unknown and random can't refute, keep terms distinct (no rule)");
     ("--info", Arg.Set info, " Print detailed per-iteration counts (reducible/skipped terms, decision breakdown, SMT/tier activity). Also via RULE_ENUM_INFO=1");
+    ("--progress", Arg.Set progress, " Show a progress bar (on a TTY) during each iteration, by enumerated terms processed");
     ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
     ("--rule-output", Arg.Set_string rule_output, " FILE  Save rules (one per line) in load-able format");
     ("--irred-output", Arg.Set_string irred_output, " FILE  Save irreducibles (one per line) in load-able format");
@@ -288,6 +290,7 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
+      ~progress:!progress
   | "bv" -> run_with Rule_enum.Domain_bv.bv_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
       ~num_domains:!jobs ~domain_name:"bv"
@@ -297,6 +300,7 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
+      ~progress:!progress
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
@@ -309,4 +313,5 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
+      ~progress:!progress
   | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" !domain_name; exit 1

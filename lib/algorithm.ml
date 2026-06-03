@@ -121,6 +121,19 @@ let unknown_extra_inputs =
        | Some s -> (try max 0 (int_of_string s) with _ -> 1000)
        | None -> 1000)
 
+(* Enumerated-term counts of the most recent sizes (most-recent first),
+   used to estimate the next size's count for the enumeration progress
+   bar. Enumeration has no known total until it finishes, and predicting
+   it exactly is ~as costly as enumerating; the count grows roughly
+   geometrically, so we extrapolate from the last two sizes. Reset per
+   `run`. *)
+let enum_history = ref []
+let estimate_next_enum () =
+  match !enum_history with
+  | b :: a :: _ when a > 0 -> b * b / a   (* geometric: b * (b/a) *)
+  | b :: _ -> b * 3                        (* one point: assume ~3x growth *)
+  | [] -> 0
+
 (* Equivalence verdict.
    - `Proven`:   SMT proved equivalence (or no-SMT mode, random is oracle).
    - `Assumed`:  SMT Unknown, extra random couldn't refute, assume_unproven
@@ -271,6 +284,7 @@ type match_kind = Size | Kbo | Replace | Skip
 let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
       ~norm_index ~behaviors ~behaviors_by_bv
       ~use_smt ~sym_cmp t =
+  Progress.tick ();
   let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
   (* Tier 2 / 3 are deferred to rule-emission time (apply_decisions and
      post-group code), where we have both terms' cells in scope and can
@@ -681,10 +695,18 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       let rec take n = function x :: xs when n > 0 -> x :: take (n-1) xs | _ -> [] in
       take extra cur
   in
+  (* Enumeration phase: indeterminate progress (Enum ticks per term),
+     with an approximate % from the size-growth estimate. *)
+  Progress.start ~est:(estimate_next_enum ())
+    ~label:(Printf.sprintf "size %d enumerating" n) ~total:0 ();
   let enumerated =
     Enum.enumerate_terms_caps dom.Domain.all_symbols (irreducibles rs) n caps in
+  let n_enum = List.length enumerated in
+  enum_history := n_enum :: !enum_history;
   let t_enum = Sys.time () -. t_start in
-  prof_label (Printf.sprintf "iter %d enum (%d)" n (List.length enumerated)) t_enum;
+  prof_label (Printf.sprintf "iter %d enum (%d)" n n_enum) t_enum;
+  (* Processing phase: exact bar over the now-known term count. *)
+  Progress.start ~label:(Printf.sprintf "size %d processing" n) ~total:n_enum ();
   let inputs = rs.inputs in
   let all_inputs = inputs @ if rs.use_smt_forced then List.map (fun vars ->
     List.map (fun (v, n) -> (v, dom.Domain.int_to_val n)) vars) rs.forced_inputs
@@ -956,6 +978,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
     groups;
   prof_label (Printf.sprintf "kbo-extract (%d groups)" (List.length groups))
     (Sys.time () -. t_kbo_extract);
+  Progress.finish ();
   let sorted = List.sort (fun (a,_,_) (b,_,_) -> Kbo.compare_total sym_cmp a b) !new_irr_pairs in
   List.iter (fun entry -> rs.behaviors <- entry :: rs.behaviors) (List.rev sorted);
   new_irreducibles := List.map (fun (t, _, _) -> t) sorted;
@@ -1000,10 +1023,12 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
 
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
-      ?unknown_inputs
+      ?unknown_inputs ?(progress = false)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   Types.clear_cons_cache ();
+  Progress.enabled := progress;
+  enum_history := [];
   (match unknown_inputs with Some n -> unknown_extra_inputs := max 0 n | None -> ());
   let caps = make_caps ?max_vars ?max_holes ~max_vcs () in
   let default_max = match max_size with Some m -> m | None -> 12 in
