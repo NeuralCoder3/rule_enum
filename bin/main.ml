@@ -132,8 +132,8 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
             s.enumerated i.i_var_only i.i_with_holes i.i_reducible
             i.i_candidates_dedup i.i_candidates_raw i.i_bv_groups;
           Printf.printf
-            "    [info] decisions: size-rule=%d kbo-rule=%d replace=%d dup-of-existing=%d\n%!"
-            i.i_size_decisions i.i_kbo_decisions i.i_replace i.i_dup_skip;
+            "    [info] decisions: size-rule=%d kbo-rule=%d dup-of-existing=%d\n%!"
+            i.i_size_decisions i.i_kbo_decisions i.i_dup_skip;
           (* Equivalence oracle: the exact exhaustive count is nonzero
              exactly when the domain is small enough to decide without Z3
              (bool, low-width bv); SMT stats appear only when --smt is on. *)

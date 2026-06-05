@@ -65,7 +65,7 @@ type ('s, 'a) rule_sets = {
      iteration's end) instead of rebuilt per subpass — O(new) rather than
      O(|behaviors|) each time. `bv_index_dirty` forces a full rebuild when
      the invariant `bv_index = build_bv_index behaviors` can be broken:
-     the --smt-forced remap (recomputes every bv) or a D_replace. *)
+     the --smt-forced remap recomputes every bv. *)
   mutable bv_index    : ('a array, ('s Types.term * 'a array * 'a examples) list) Hashtbl.t;
   mutable bv_index_dirty : bool;
 }
@@ -377,7 +377,6 @@ type iter_info = {
   i_reducible : int;         (* enumerated terms dropped: a rewrite applied *)
   i_size_decisions : int;    (* candidates that became size-reducing rules *)
   i_kbo_decisions : int;     (* candidates that became KBO rules *)
-  i_replace : int;           (* candidates that replaced a larger irreducible *)
   i_dup_skip : int;          (* candidates equal to an existing irreducible *)
   i_candidates_raw : int;    (* fresh-candidate decisions (pre-dedup) *)
   i_candidates_dedup : int;  (* distinct candidates fed to grouping *)
@@ -422,11 +421,10 @@ type 's iter_summary = {
 type ('s, 'a) term_decision =
   | D_size_rule of 's Types.rule * ('s Types.term * 'a array * 'a examples) * 's Types.term
   | D_kbo_rule  of 's Types.rule * ('s Types.term * 'a array * 'a examples) * 's Types.term
-  | D_replace   of 's Types.term * 's Types.term * 'a array * 'a examples
   | D_skip
   | D_candidate of 's Types.term * 'a array * 'a examples
 
-type match_kind = Size | Kbo | Replace | Skip
+type match_kind = Size | Kbo | Skip
 
 (* `equiv_irrs_anon`: like `equiv_irrs` but uses an "anon-aware" bucket
    where each entry is `(form, primary_entry)`. The same source primary
@@ -482,20 +480,19 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
             (match best with
              | None -> loop (Some (irr, Size)) best_const rest
              | Some (prev, Size) -> loop (Some (prefer irr prev, Size)) best_const rest
-             | Some (_, (Kbo | Replace | Skip)) -> loop (Some (irr, Size)) best_const rest)
+             | Some (_, (Kbo | Skip)) -> loop (Some (irr, Size)) best_const rest)
           | Kbo.Less ->
             (match best with
              | None -> loop (Some (irr, Kbo)) best_const rest
              | Some (_, Size) -> loop best best_const rest
              | Some (prev, Kbo) -> loop (Some (prefer irr prev, Kbo)) best_const rest
-             | Some (_, (Replace | Skip)) -> loop (Some (irr, Kbo)) best_const rest)
+             | Some (_, Skip) -> loop (Some (irr, Kbo)) best_const rest)
           | Kbo.Greater ->
-            (match best with
-             | None -> loop (Some (irr, Replace)) best_const rest
-             | Some (_, Size) -> loop best best_const rest
-             | Some (_, Kbo) -> loop best best_const rest
-             | Some (prev, Replace) -> loop (Some (prefer irr prev, Replace)) best_const rest
-             | Some (_, Skip) -> loop (Some (irr, Replace)) best_const rest)
+            (* Unreachable: enumeration is size-monotonic, so a prior
+               irreducible (size < this term) can never be KBO-Greater
+               than it. This is exactly the case D_replace used to handle;
+               since it cannot occur, there is no replacement to make. *)
+            assert false
           | Kbo.Incomparable ->
             (* Var-KBO can't orient (var-count gate fails or distinct
                vars at same lex position). Try the constP version: both
@@ -525,9 +522,8 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
       Some (D_kbo_rule ((lhs_hole, rhs_hole), cand, irr_src))
     | (Some (irr, Size), _) -> Some (D_size_rule ((simplified, irr), cand, irr))
     | (Some (irr, Kbo), _) -> Some (D_kbo_rule ((simplified, irr), cand, irr))
-    | (Some (irr, Replace), _) -> Some (D_replace (irr, simplified, bv, ex))
     | (Some (_, Skip), _) -> Some D_skip
-    | (None, Some (_, (Replace | Skip), _)) ->
+    | (None, Some (_, Skip, _)) ->
       Some (D_candidate (simplified, bv, ex))
   in
   (* Inputs come from enumerate_terms_caps which produces canonical
@@ -550,7 +546,7 @@ let make_rule_seen rules =
   h
 
 let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      ~inputs ~size_seen ~kbo_seen ~use_smt ~smt_vars
+      ~size_seen ~kbo_seen ~use_smt ~smt_vars
       (decisions : ('s, 'a) term_decision list) =
   let new_size_rules = ref [] in let new_kbo_rules = ref [] in let candidates = ref [] in
   (* Build a term → cell lookup so SMT counterexamples accumulate into
@@ -605,31 +601,6 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
       commit_size cand rule (fst rule) irr_src
     | D_kbo_rule (rule, cand, irr_src) ->
       commit_kbo cand rule (fst rule) irr_src
-    | D_replace (old_irr, new_term, stored_bv, ex) ->
-      let cand = (new_term, stored_bv, ex) in
-      let idx = ref (-1) in
-      List.iteri (fun i (term, _, _) ->
-        if !idx = -1 && Types.term_eq dom.Domain.sym_compare term old_irr then idx := i)
-        rs.behaviors;
-      (match !idx with -1 -> () | i ->
-        let current_irr, _, current_ex = List.nth rs.behaviors i in
-        match Kbo.kbo dom.Domain.sym_compare new_term current_irr with
-        | Kbo.Equal -> ()
-        | Kbo.Greater ->
-          commit_kbo cand (new_term, current_irr) new_term current_irr
-        | Kbo.Less ->
-          let rule = (current_irr, new_term) in
-          commit_kbo cand rule new_term current_irr;
-          let new_bv = Eval.behavior dom inputs new_term in
-          (* new_term ≡ old_irr was SMT-confirmed inside commit_kbo_rule;
-             safe to inherit the accumulated cell. *)
-          rs.behaviors <- List.mapi (fun j (t', b, e) ->
-            if j = i then (new_term, new_bv, current_ex) else (t', b, e)) rs.behaviors;
-          rs.bv_index_dirty <- true  (* an existing entry changed *)
-        | Kbo.Incomparable ->
-          let new_bv = Eval.behavior dom inputs new_term in
-          rs.behaviors <- (new_term, new_bv, ex) :: rs.behaviors;
-          rs.bv_index_dirty <- true)
     | D_skip -> ()
     | D_candidate (t, bv, ex) -> candidates := (t, bv, ex) :: !candidates
   ) decisions;
@@ -814,34 +785,33 @@ let parallel_map ~num_domains f lst =
     let thunks = Array.map (fun ch () -> List.map f ch) chunks in
     List.concat (Array.to_list (Pool.run pool thunks))
 
-(* Per-subpass decision tally for --info: (reducible, size, kbo, replace,
+(* Per-subpass decision tally for --info: (reducible, size, kbo,
    dup_skip, candidate). `reducible` = enumerated terms that a rule
    rewrote (so process_term dropped them); the rest are the decision
    kinds returned. *)
 type subpass_counts = {
   c_reducible : int; c_size : int; c_kbo : int;
-  c_replace : int; c_dup_skip : int; c_candidate : int;
+  c_dup_skip : int; c_candidate : int;
 }
 
 let count_decisions ~enumerated decisions =
-  let sz = ref 0 and kb = ref 0 and rp = ref 0 and sk = ref 0 and cd = ref 0 in
+  let sz = ref 0 and kb = ref 0 and sk = ref 0 and cd = ref 0 in
   List.iter (function
     | D_size_rule _ -> incr sz
     | D_kbo_rule _ -> incr kb
-    | D_replace _ -> incr rp
     | D_skip -> incr sk
     | D_candidate _ -> incr cd) decisions;
   { c_reducible = enumerated - List.length decisions;
-    c_size = !sz; c_kbo = !kb; c_replace = !rp;
+    c_size = !sz; c_kbo = !kb;
     c_dup_skip = !sk; c_candidate = !cd }
 
 let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
-      ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+      ~compiled_inputs_arr ~size_seen ~kbo_seen
       ~num_domains ~use_smt ~smt_vars ~sym_cmp enumerated =
   let norm_index = Rewrite.index_rules (all_rules rs) in
-  (* Reuse the persistent bv-index; only rebuild if an event invalidated
-     it (--smt-forced remap or D_replace). Behaviors don't change between
-     the two subpasses of an iteration, so this rebuilds at most once. *)
+  (* Reuse the persistent bv-index; only rebuild if the --smt-forced
+     remap invalidated it. Behaviors don't change between the two
+     subpasses of an iteration, so this rebuilds at most once. *)
   if rs.bv_index_dirty || force_bv_rebuild then begin
     rs.bv_index <- build_bv_index rs.behaviors;
     rs.bv_index_dirty <- false
@@ -852,7 +822,7 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
             ~behaviors_by_bv ~use_smt ~sym_cmp in
   let decisions = parallel_filter_map ~num_domains f enumerated in
   let counts = count_decisions ~enumerated:(List.length enumerated) decisions in
-  let (sr, kr, cands) = apply_decisions dom rs ~inputs:all_inputs
+  let (sr, kr, cands) = apply_decisions dom rs
     ~size_seen ~kbo_seen ~use_smt ~smt_vars decisions in
   (sr, kr, cands, counts)
 
@@ -954,12 +924,12 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let kbo_seen = make_rule_seen rs.kbo_rules in
   let t_sp1 = Sys.time () in
   let sr1, kr1, cands1, ct1 = run_subpass dom rs
-    ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+    ~compiled_inputs_arr ~size_seen ~kbo_seen
     ~num_domains ~use_smt ~smt_vars ~sym_cmp var_only in
   prof_label (Printf.sprintf "subpass1 var (%d)" (List.length var_only)) (Sys.time () -. t_sp1);
   let t_sp2 = Sys.time () in
   let sr2, kr2, cands2, ct2 = run_subpass dom rs
-    ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
+    ~compiled_inputs_arr ~size_seen ~kbo_seen
     ~num_domains ~use_smt ~smt_vars ~sym_cmp with_holes in
   prof_label (Printf.sprintf "subpass2 hole (%d)" (List.length with_holes)) (Sys.time () -. t_sp2);
   let new_size_rules = ref (sr1 @ sr2) in
@@ -1281,7 +1251,6 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       i_reducible = ct1.c_reducible + ct2.c_reducible;
       i_size_decisions = ct1.c_size + ct2.c_size;
       i_kbo_decisions = ct1.c_kbo + ct2.c_kbo;
-      i_replace = ct1.c_replace + ct2.c_replace;
       i_dup_skip = ct1.c_dup_skip + ct2.c_dup_skip;
       i_candidates_raw = candidates_raw_count;
       i_candidates_dedup = candidates_dedup_count;
