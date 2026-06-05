@@ -511,11 +511,73 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
     let (b, bc) = loop None None candidates in
     (b, bc)
   in
+  (* Dead-hole reduction (closes a ground-confluence gap): a constP that
+     cancels out — e.g. B in `B-(A+(B+C))` ≡ -(A+C), or A in `A-(A+B)` ≡ -B
+     — leaves the term in a bv-bucket of its own (its behavior vector skips
+     the dead slot), so the ordinary bv-lookup never connects it to its
+     smaller true equivalent and it is wrongly kept as a fresh irreducible.
+     We detect a dead hole (the behavior is invariant to that slot), then
+     look the *hole-compacted* bv up among the existing irreducibles and
+     propose `simplified -> rhs`, where rhs is the smaller equivalent with
+     its holes remapped back onto `simplified`'s live slots. apply_decisions
+     SMT-confirms the rule, so a bv false-positive is harmless (the rule is
+     rejected and the term simply stays a candidate). *)
+  let holes_in_order t =
+    let seen = Hashtbl.create 4 in let acc = ref [] in
+    let rec go = function
+      | Types.Hole n -> if not (Hashtbl.mem seen n) then (Hashtbl.add seen n (); acc := n :: !acc)
+      | Types.Var _ -> () | Types.Node (_, a) -> List.iter go a
+    in go t; List.rev !acc
+  in
+  let rename_holes f t =
+    let rec go = function
+      | Types.Hole n -> Types.mk_hole (f n)
+      | Types.Var v -> Types.mk_var v
+      | Types.Node (s, a) -> Types.mk_node s (List.map go a)
+    in go t
+  in
+  let bv_of t = Eval.behavior_compiled_arr dom compiled_inputs_arr t in
+  let dead_hole_rule simplified bv =
+    let holes = holes_in_order simplified in
+    if List.length holes < 2 then None else
+    let is_dead h =
+      match List.filter (fun x -> x <> h) holes with
+      | [] -> false
+      | h2 :: _ -> bv_of (rename_holes (fun n -> if n = h then h2 else n) simplified) = bv
+    in
+    let dead = List.filter is_dead holes in
+    let live = List.filter (fun h -> not (List.mem h dead)) holes in
+    if dead = [] || live = [] then None else begin
+      (* live holes -> 0..m-1 (first-occurrence order), dead -> m.. so the
+         compacted bv matches the canonical (live-hole-only) equivalent. *)
+      let tbl = Hashtbl.create 4 in
+      List.iteri (fun i h -> Hashtbl.replace tbl h i) live;
+      List.iteri (fun i h -> Hashtbl.replace tbl h (List.length live + i)) dead;
+      let compact = rename_holes (fun n -> try Hashtbl.find tbl n with Not_found -> n) simplified in
+      match Hashtbl.find_opt behaviors_by_bv (bv_of compact) with
+      | None -> None
+      | Some irrs ->
+        let t_sz = Types.size simplified in
+        match List.filter (fun (s, _, _) -> Types.size s < t_sz) irrs with
+        | [] -> None
+        | (s0, _, _) :: _ as smaller ->
+          let s_canon = List.fold_left (fun acc (s, _, _) ->
+            if Kbo.compare_total sym_cmp s acc < 0 then s else acc) s0 smaller in
+          (* remap the canonical equivalent's holes 0..m-1 onto the live slots *)
+          let live_arr = Array.of_list live in
+          Some (rename_holes
+            (fun i -> if i >= 0 && i < Array.length live_arr then live_arr.(i) else i)
+            s_canon)
+    end
+  in
   let decide ex bv simplified =
     let cand = (simplified, bv, ex) in
     let _ = ex in
     match find_best simplified (equiv_irrs bv) with
-    | (None, None) -> Some (D_candidate (simplified, bv, ex))
+    | (None, None) ->
+      (match dead_hole_rule simplified bv with
+       | Some rhs -> Some (D_size_rule ((simplified, rhs), cand, rhs))
+       | None -> Some (D_candidate (simplified, bv, ex)))
     | (None, Some ((lhs_hole, rhs_hole), Size, irr_src)) ->
       Some (D_size_rule ((lhs_hole, rhs_hole), cand, irr_src))
     | (None, Some ((lhs_hole, rhs_hole), Kbo, irr_src)) ->
@@ -611,7 +673,14 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
 let force_bv_rebuild =
   try Sys.getenv "RULE_ENUM_NO_BVIDX" = "1" with Not_found -> false
 
+(* Total bv-index insertions over the run: with the incremental index
+   this is ~one per irreducible ever discovered; the old rebuild path
+   re-inserts every behavior on every subpass, so the ratio shows the
+   redundant work eliminated. *)
+let bv_index_inserts = ref 0
+
 let bv_index_add idx ((_, bv, _) as entry) =
+  incr bv_index_inserts;
   let bucket = try Hashtbl.find idx bv with Not_found -> [] in
   Hashtbl.replace idx bv (entry :: bucket)
 

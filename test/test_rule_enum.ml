@@ -1177,6 +1177,54 @@ let test_all_possible_terms_soundness_and_confluence () =
     "  all-terms soundness+confluence (size≤%d): OK (%d total terms, %d classes, %d+%d SMT calls)\n"
     max_size (List.length all_terms) !n_classes !n_sound_calls !n_pairwise_calls
 
+(* Regression: dead-hole (cancelling constP) reduction.
+
+   A constP that cancels out — e.g. B in `A-(A+B)` ≡ -B, or B in
+   `B-(A+(B+C))` ≡ -(A+C) — gives the term a behavior vector that skips
+   the dead slot, so the ordinary bv-lookup never connects it to its
+   smaller true equivalent. Before the fix these were wrongly kept as
+   irreducibles, leaving a ground-confluence gap (two equivalent ground
+   terms reaching different normal forms). Each witness must now reduce to
+   a strictly smaller, SMT-equivalent normal form and must NOT be listed
+   as an irreducible. *)
+let test_dead_hole_reduction () =
+  Random.init 42;
+  let k = 3 in
+  (* max_size 7 so every witness is within enumeration scope (the largest,
+     A-(A+(B+C)), is size 7). A dead-hole term reduces once its smaller
+     hole-compacted equivalent is a listed irreducible, which holds for any
+     term of size <= max_size. *)
+  let rs, _ = Algorithm.run ~max_size:7 int_dom ~num_domains:1
+    ~num_random_inputs:100 ~max_vcs:k ~max_holes:k ~use_smt:true in
+  let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let sym_cmp = int_sym_cmp in
+  let sym_str = Domain_int.string_of_symbol in
+  let smt_vars = List.init k Types.var_name @ List.init k Types.hole_name in
+  let index = Rewrite.index_rules rules in
+  let h i = Types.mk_hole i in
+  let minus a b = Types.mk_node Domain_int.Minus [a; b] in
+  let plus a b = Types.mk_node Domain_int.Plus [a; b] in
+  let witnesses =
+    [ minus (h 0) (plus (h 0) (h 1));                       (* A-(A+B)     = -B      *)
+      minus (h 0) (minus (h 0) (h 1));                      (* A-(A-B)     =  B      *)
+      minus (h 0) (plus (h 0) (plus (h 1) (h 2))) ] in      (* A-(A+(B+C)) = -(B+C)  *)
+  List.iter (fun t ->
+    let n = Rewrite.norm_bottom ~sym_cmp ~index t in
+    if Types.size n >= Types.size t then begin
+      Printf.eprintf "  DEAD-HOLE NOT REDUCED: %s --> %s\n"
+        (Types.to_string sym_str t) (Types.to_string sym_str n); assert false
+    end;
+    (match Smt.check_equiv int_dom smt_vars t n with
+     | Smt.Equivalent -> ()
+     | _ ->
+       Printf.eprintf "  DEAD-HOLE REWRITE UNSOUND: %s --> %s\n"
+         (Types.to_string sym_str t) (Types.to_string sym_str n); assert false);
+    assert (not (List.exists (fun (x, _, _) -> Types.term_eq sym_cmp x t)
+                   rs.Algorithm.behaviors)))
+    witnesses;
+  Printf.printf "  dead-hole reduction (cancelling constP): OK (%d witnesses reduced)\n"
+    (List.length witnesses)
+
 (* Tier 2 must short-circuit some SMT calls when cells are populated.
    At rand=1 size 5 we observe ~50% short-circuit; this asserts the
    cells-accumulate-then-cross-eval path actually fires. *)
@@ -1279,6 +1327,7 @@ let () = Printf.printf "Running tests...\n";
   test_save_load_normalize ();
   test_full_soundness_and_completeness ();
   test_all_possible_terms_soundness_and_confluence ();
+  test_dead_hole_reduction ();
   test_tier2_accumulates_and_short_circuits ();
   test_algorithm_int (); test_algorithm_bool (); test_size_progression ();
   test_forced_inputs (); test_all_bool_inputs ();

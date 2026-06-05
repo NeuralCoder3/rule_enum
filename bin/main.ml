@@ -170,7 +170,8 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
     let h = !Rule_enum.Types.cons_hits
     and m = !Rule_enum.Types.cons_misses in
     Printf.eprintf "Term cons cache: hits=%d  misses=%d  hit-rate=%.1f%%  unique=%d\n%!"
-      h m (100.0 *. float_of_int h /. float_of_int (max 1 (h + m))) m
+      h m (100.0 *. float_of_int h /. float_of_int (max 1 (h + m))) m;
+    Printf.eprintf "bv-index inserts: %d\n%!" !Rule_enum.Algorithm.bv_index_inserts
   end;
   write_footer oc_report to_str total_elapsed rs;
   Option.iter close_out oc_report; Option.iter close_out oc_stats;
