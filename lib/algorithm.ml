@@ -184,7 +184,9 @@ let tier3_unknown_fallback ~assume_unproven (dom : ('s, 'a) Domain.t) ~smt_vars 
    decided; None therefore implies non-equivalence (or an already-reducible
    constant), which callers treat accordingly. *)
 let exhaustive_max_combos = 300_000
-let exhaustive_calls = ref 0
+(* Atomic: incremented from worker domains during the parallel
+   fully-exhaustive confirmation, so a plain ref would race. *)
+let exhaustive_calls = Atomic.make 0
 
 let distinct_leaf_names t1 t2 =
   let tbl = Hashtbl.create 8 in
@@ -212,7 +214,7 @@ let exhaustive_equiv (dom : ('s, 'a) Domain.t) t1 t2 : bool option =
       else if i = 0 then acc else pow (acc * nv) (i - 1) in
     if d > 0 && pow 1 d > exhaustive_max_combos then None
     else begin
-      incr exhaustive_calls;
+      Atomic.incr exhaustive_calls;
       let idx = Array.make (max d 1) 0 in
       let equal = ref true and continue = ref true in
       while !continue && !equal do
@@ -371,6 +373,10 @@ type iter_info = {
   i_candidates_raw : int;    (* fresh-candidate decisions (pre-dedup) *)
   i_candidates_dedup : int;  (* distinct candidates fed to grouping *)
   i_bv_groups : int;         (* behavior-vector groups formed *)
+  (* Exact exhaustive-oracle equivalence checks (Z3-free) this iteration.
+     Nonzero ⇔ the domain is small enough (bool, low-width bv) to decide
+     equivalence without SMT. *)
+  i_exhaustive : int;
   (* SMT / tier activity attributable to THIS iteration (deltas). *)
   i_smt_calls : int;
   i_tier2_short : int;
@@ -849,6 +855,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   (* Snapshot global tier counters for per-iteration deltas (--info). *)
   let smt0 = !tier3_calls and t2sc0 = !tier2_short_circuit in
   let unk0 = !tier3_unknown and ref0 = !tier3_unknown_refuted and cex0 = !tier3_cex_added in
+  let exh0 = Atomic.get exhaustive_calls in
   let suffix_added prev cur =
     (* cur is `new @ prev` (rules prepended); return just the new prefix. *)
     let extra = List.length cur - List.length prev in
@@ -1245,6 +1252,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       i_candidates_raw = candidates_raw_count;
       i_candidates_dedup = candidates_dedup_count;
       i_bv_groups = n_bv_groups;
+      i_exhaustive = Atomic.get exhaustive_calls - exh0;
       i_smt_calls = !tier3_calls - smt0;
       i_tier2_short = !tier2_short_circuit - t2sc0;
       i_tier3_unknown = !tier3_unknown - unk0;

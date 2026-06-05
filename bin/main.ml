@@ -134,11 +134,18 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
           Printf.printf
             "    [info] decisions: size-rule=%d kbo-rule=%d replace=%d dup-of-existing=%d\n%!"
             i.i_size_decisions i.i_kbo_decisions i.i_replace i.i_dup_skip;
-          if use_smt then
-            Printf.printf
-              "    [info] smt-calls=%d  tier2-short-circuit=%d  unknown=%d (refuted=%d, accepted/declined=%d)  counterexamples=%d\n%!"
-              i.i_smt_calls i.i_tier2_short i.i_tier3_unknown i.i_tier3_refuted
-              (i.i_tier3_unknown - i.i_tier3_refuted) i.i_tier3_cex
+          (* Equivalence oracle: the exact exhaustive count is nonzero
+             exactly when the domain is small enough to decide without Z3
+             (bool, low-width bv); SMT stats appear only when --smt is on. *)
+          Printf.printf
+            "    [info] equiv-oracle: exhaustive(exact, Z3-free)=%d%s\n%!"
+            i.i_exhaustive
+            (if use_smt then
+               Printf.sprintf
+                 "  smt-calls=%d  tier2-short-circuit=%d  unknown=%d (refuted=%d, accepted/declined=%d)  counterexamples=%d"
+                 i.i_smt_calls i.i_tier2_short i.i_tier3_unknown i.i_tier3_refuted
+                 (i.i_tier3_unknown - i.i_tier3_refuted) i.i_tier3_cex
+             else "")
         end;
         write_iteration ?oc_header:oc_stats ?oc_report to_str s;
         write_outputs rs) in
@@ -147,9 +154,10 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
     total_elapsed (List.length rs.size_rules) (List.length rs.kbo_rules) (List.length rs.behaviors);
   if try Sys.getenv "RULE_ENUM_PROFILE" = "1" with Not_found -> false then begin
     Printf.eprintf
-      "Tier stats: total=%d  tier2_short_circuit=%d  tier3_smt=%d  tier3_cex=%d  tier3_unknown=%d (refuted=%d)\n%!"
+      "Tier stats: total=%d  tier2_short_circuit=%d  exhaustive_exact=%d  tier3_smt=%d  tier3_cex=%d  tier3_unknown=%d (refuted=%d)\n%!"
       !Rule_enum.Algorithm.tier_calls
       !Rule_enum.Algorithm.tier2_short_circuit
+      (Atomic.get Rule_enum.Algorithm.exhaustive_calls)
       !Rule_enum.Algorithm.tier3_calls
       !Rule_enum.Algorithm.tier3_cex_added
       !Rule_enum.Algorithm.tier3_unknown
