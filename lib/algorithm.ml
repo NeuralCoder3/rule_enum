@@ -60,12 +60,21 @@ type ('s, 'a) rule_sets = {
   (* When false (safe mode), an unproven equivalence is treated as
      not-equivalent rather than assumed: no rule is emitted from it. *)
   assume_unproven     : bool;
+  (* Persistent behavior-vector index of all committed irreducibles,
+     keyed by bv. Maintained incrementally (winners appended at each
+     iteration's end) instead of rebuilt per subpass — O(new) rather than
+     O(|behaviors|) each time. `bv_index_dirty` forces a full rebuild when
+     the invariant `bv_index = build_bv_index behaviors` can be broken:
+     the --smt-forced remap (recomputes every bv) or a D_replace. *)
+  mutable bv_index    : ('a array, ('s Types.term * 'a array * 'a examples) list) Hashtbl.t;
+  mutable bv_index_dirty : bool;
 }
 
 let create ~use_smt ~use_smt_forced ?(assume_unproven = true) inputs = {
   size_rules = []; kbo_rules = []; behaviors = []; forced_inputs = [];
   assumed_rules = []; skipped_rules = [];
   inputs; use_smt; use_smt_forced; assume_unproven;
+  bv_index = Hashtbl.create 1024; bv_index_dirty = false;
 }
 
 let irreducibles rs = List.map (fun (t, _, _) -> t) rs.behaviors
@@ -615,20 +624,29 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
           (* new_term ≡ old_irr was SMT-confirmed inside commit_kbo_rule;
              safe to inherit the accumulated cell. *)
           rs.behaviors <- List.mapi (fun j (t', b, e) ->
-            if j = i then (new_term, new_bv, current_ex) else (t', b, e)) rs.behaviors
+            if j = i then (new_term, new_bv, current_ex) else (t', b, e)) rs.behaviors;
+          rs.bv_index_dirty <- true  (* an existing entry changed *)
         | Kbo.Incomparable ->
           let new_bv = Eval.behavior dom inputs new_term in
-          rs.behaviors <- (new_term, new_bv, ex) :: rs.behaviors)
+          rs.behaviors <- (new_term, new_bv, ex) :: rs.behaviors;
+          rs.bv_index_dirty <- true)
     | D_skip -> ()
     | D_candidate (t, bv, ex) -> candidates := (t, bv, ex) :: !candidates
   ) decisions;
   (!new_size_rules, !new_kbo_rules, !candidates)
 
+(* Escape hatch: force the old rebuild-every-subpass behavior (for
+   benchmarking / debugging the incremental index). *)
+let force_bv_rebuild =
+  try Sys.getenv "RULE_ENUM_NO_BVIDX" = "1" with Not_found -> false
+
+let bv_index_add idx ((_, bv, _) as entry) =
+  let bucket = try Hashtbl.find idx bv with Not_found -> [] in
+  Hashtbl.replace idx bv (entry :: bucket)
+
 let build_bv_index behaviors =
   let h = Hashtbl.create (max 16 (List.length behaviors)) in
-  List.iter (fun ((_, bv, _) as entry) ->
-    let bucket = try Hashtbl.find h bv with Not_found -> [] in
-    Hashtbl.replace h bv (entry :: bucket)) behaviors;
+  List.iter (bv_index_add h) behaviors;
   h
 
 (* Subpass: normalize + decide on a list of enumerated terms.
@@ -821,7 +839,14 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
       ~all_inputs ~compiled_inputs_arr ~size_seen ~kbo_seen
       ~num_domains ~use_smt ~smt_vars ~sym_cmp enumerated =
   let norm_index = Rewrite.index_rules (all_rules rs) in
-  let behaviors_by_bv = build_bv_index rs.behaviors in
+  (* Reuse the persistent bv-index; only rebuild if an event invalidated
+     it (--smt-forced remap or D_replace). Behaviors don't change between
+     the two subpasses of an iteration, so this rebuilds at most once. *)
+  if rs.bv_index_dirty || force_bv_rebuild then begin
+    rs.bv_index <- build_bv_index rs.behaviors;
+    rs.bv_index_dirty <- false
+  end;
+  let behaviors_by_bv = rs.bv_index in
   let f = process_term dom ~compiled_inputs_arr
             ~norm_index ~behaviors:rs.behaviors
             ~behaviors_by_bv ~use_smt ~sym_cmp in
@@ -879,11 +904,14 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let all_inputs = inputs @ if rs.use_smt_forced then List.map (fun vars ->
     List.map (fun (v, n) -> (v, dom.Domain.int_to_val n)) vars) rs.forced_inputs
   else [] in
-  if rs.use_smt_forced then
+  if rs.use_smt_forced then begin
     rs.behaviors <- List.map (fun (irr, _, _) ->
       let bv = Eval.behavior dom all_inputs irr in
       let ex = ref (Eval.make_examples dom all_inputs irr) in
       (irr, bv, ex)) rs.behaviors;
+    (* New forced inputs change every irreducible's bv → index stale. *)
+    rs.bv_index_dirty <- true
+  end;
   (* SMT is the Tier-3 correctness check: random-bv is Tier 1 (cheap
      prefilter), per-term examples is Tier 2 (currently empty for the
      fast path), SMT confirms equivalence when the cheaper tiers agree.
@@ -1230,7 +1258,13 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
     (Sys.time () -. t_confirm);
   Progress.finish ();
   let sorted = List.sort (fun (a,_,_) (b,_,_) -> Kbo.compare_total sym_cmp a b) !new_irr_pairs in
-  List.iter (fun entry -> rs.behaviors <- entry :: rs.behaviors) (List.rev sorted);
+  List.iter (fun entry ->
+    rs.behaviors <- entry :: rs.behaviors;
+    (* Keep the persistent bv-index in lock-step with behaviors. If it was
+       invalidated this iteration it will be rebuilt wholesale next subpass,
+       so the incremental add is only needed while clean. *)
+    if not rs.bv_index_dirty then bv_index_add rs.bv_index entry)
+    (List.rev sorted);
   new_irreducibles := List.map (fun (t, _, _) -> t) sorted;
   { size = n; enumerated = List.length enumerated;
     new_size_rules = List.rev !new_size_rules; new_kbo_rules = List.rev !new_kbo_rules;
