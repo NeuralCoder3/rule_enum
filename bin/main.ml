@@ -220,7 +220,8 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
   | "int" -> load RE.Domain_int.int_domain
   | "bv" -> load RE.Domain_bv.bv_domain
   | "bool" -> load RE.Domain_bool.bool_domain
-  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" domain_name; exit 1
+  | "demo" -> load RE.Domain_demo.demo_domain
+  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, bool, or demo)\n" domain_name; exit 1
 
 let () =
   let domain_name = ref "int" in
@@ -250,7 +251,7 @@ let () =
   (* 0 means auto-detect (RULE_ENUM_JOBS env var, else recommended-domain-count). *)
   let jobs = ref 0 in
   let speclist = [
-    ("--domain", Arg.Set_string domain_name, " int|bv|bool  Evaluation domain (default: int)");
+    ("--domain", Arg.Set_string domain_name, " int|bv|bool|demo  Evaluation domain (default: int)");
     ("--max-vcs", Arg.Set_int max_vcs, " K  Sum bound: distinct vars + distinct holes (default: 3)");
     ("--max-vars", Arg.Set_int max_vars, " N  Distinct-var cap (default: same as --max-vcs)");
     ("--max-holes", Arg.Set_int max_holes, " N  Distinct-hole cap (default: same as --max-vcs); set 0 for fast var-only enumeration (INCOMPLETE: omits some constP reassociation rules)");
@@ -333,4 +334,14 @@ let () =
       ~unknown_inputs
       ~info:!info
       ~progress:!progress
-  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, or bool)\n" !domain_name; exit 1
+  | "demo" -> run_with Rule_enum.Domain_demo.demo_domain [] num_rand
+      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
+      ~num_domains:!jobs ~domain_name:"demo"
+      ~output_file:!output_file ~stats_file:!stats_file
+      ~rule_output:!rule_output ~irred_output:!irred_output
+      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
+      ~assume_unproven:(not !safe_mode)
+      ~unknown_inputs
+      ~info:!info
+      ~progress:!progress
+  | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, bool, or demo)\n" !domain_name; exit 1

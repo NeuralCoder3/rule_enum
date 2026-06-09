@@ -1369,7 +1369,14 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
     let summary = run_iteration dom rs !n caps
         ~num_domains:workers
         ~sym_cmp:dom.Domain.sym_compare in
-    if summary.new_size_rules = [] && summary.new_kbo_rules = [] && summary.new_irreducibles = [] then
+    (* Terminate only on a *non-empty* iteration that made no progress (a
+       genuine fixpoint). An empty enumeration is a size GAP, not a
+       fixpoint: a domain whose smallest operator has arity k > 1 (and no
+       unary op) produces nothing at some sizes — e.g. with only a binary
+       `+` and a 0-ary `0`, size 2 is empty while size 3 has `a+b`. Quitting
+       on the gap would never reach the operator terms. *)
+    if summary.enumerated > 0
+       && summary.new_size_rules = [] && summary.new_kbo_rules = [] && summary.new_irreducibles = [] then
       continue := false
     else (on_iteration rs summary; results := summary :: !results; incr n)
   done; (rs, List.rev !results)

@@ -102,16 +102,24 @@ let parse_term (decode : string -> int -> 's option) (input : string) : 's Types
     let rhs = parse () in
     expect ')';
     decode_node op [lhs; rhs]
-  (* Parse `'(' arg (',' arg)* ')'` for a prefix op whose name was read. *)
+  (* Parse `'(' arg (',' arg)* ')'` for a prefix op whose name was read.
+     A 0-ary symbol renders as `name()` (e.g. `0()`), so an empty argument
+     list — `(` immediately followed by `)` — is valid. *)
   and parse_prefix op_str =
     expect '(';
-    let args = ref [parse ()] in
     skip_ws ();
-    while peek () = Some ',' do
-      advance (); args := parse () :: !args; skip_ws ()
-    done;
-    expect ')';
-    decode_node op_str (List.rev !args)
+    if peek () = Some ')' then begin
+      advance ();
+      decode_node op_str []
+    end else begin
+      let args = ref [parse ()] in
+      skip_ws ();
+      while peek () = Some ',' do
+        advance (); args := parse () :: !args; skip_ws ()
+      done;
+      expect ')';
+      decode_node op_str (List.rev !args)
+    end
   in
   let result = parse () in
   skip_ws ();
