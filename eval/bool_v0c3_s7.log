@@ -1,0 +1,13 @@
+Domain: bool,  max VCs (k): 3,  max vars: 0,  max holes: 3,  random inputs: 0,  max size: 7,  jobs: 4,  smt: false,  smt-forced: false,  safe-mode: false
+
+Size 1  [0.0s / 0.0s]  enum=1  +SR=0  +KR=0  +IR=1  total: SR=0 KR=0 IR=1
+Size 2  [0.0s / 0.0s]  enum=1  +SR=0  +KR=0  +IR=1  total: SR=0 KR=0 IR=2
+Size 3  [0.0s / 0.0s]  enum=10  +SR=3  +KR=3  +IR=4  total: SR=3 KR=3 IR=6
+Size 4  [0.0s / 0.0s]  enum=27  +SR=2  +KR=15  +IR=8  total: SR=5 KR=18 IR=14
+Size 5  [0.0s / 0.0s]  enum=258  +SR=71  +KR=60  +IR=21  total: SR=76 KR=78 IR=35
+Size 6  [0.0s / 0.0s]  enum=741  +SR=156  +KR=183  +IR=81  total: SR=232 KR=261 IR=116
+Size 7  [0.0s / 0.0s]  enum=4846  +SR=843  +KR=97  +IR=43  total: SR=1075 KR=358 IR=159
+
+Final [0.1s]: SR=1075  KR=358  IR=159
+Saved 1433 rules to eval/bool_v0c3_s7.rules
+Saved 159 irreducibles to eval/bool_v0c3_s7.irs

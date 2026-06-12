@@ -1,0 +1,9 @@
+Domain: bv,  max VCs (k): 3,  max vars: 3,  max holes: 3,  random inputs: 200,  max size: 100,  jobs: 4,  smt: true,  smt-forced: false,  safe-mode: false
+
+Size 1  [0.0s / 0.0s]  enum=2  +SR=0  +KR=0  +IR=2  total: SR=0 KR=0 IR=2
+Size 2  [0.0s / 0.0s]  enum=4  +SR=0  +KR=0  +IR=4  total: SR=0 KR=0 IR=6
+Size 3  [0.0s / 0.0s]  enum=57  +SR=4  +KR=6  +IR=38  total: SR=4 KR=6 IR=44
+Size 4  [0.0s / 0.0s]  enum=294  +SR=16  +KR=83  +IR=158  total: SR=20 KR=89 IR=202
+Size 5  [0.6s / 1.8s]  enum=3728  +SR=113  +KR=802  +IR=1738  total: SR=133 KR=891 IR=1940
+Size 6  [3.3s / 8.0s]  enum=23644  +SR=264  +KR=1555  +IR=9884  total: SR=397 KR=2446 IR=11824
+Size 7  [39.6s / 102.3s]  enum=243055  +SR=1429  +KR=11522  +IR=85869  total: SR=1826 KR=13968 IR=97693

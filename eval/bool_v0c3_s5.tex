@@ -1,0 +1,32 @@
+\documentclass{standalone}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\begin{document}
+\begin{tikzpicture}
+  \begin{axis}[
+      width=12cm, height=8cm,
+      xlabel={term size},
+      ylabel={count},
+      title={bool\_v0c3\_s5.csv},
+      ymode=log,
+      grid=both,
+      grid style={dotted, gray!40},
+      legend pos=north west,
+      legend cell align=left,
+      mark size=2pt,
+    ]
+    \definecolor{cenumerated}{HTML}{1f77b4}
+    \addplot[color=cenumerated, mark=*, thick] coordinates {(1,1) (2,1) (3,10) (4,27) (5,258)};
+    \addlegendentry{enumerated}
+    \definecolor{cnewsizerules}{HTML}{d62728}
+    \addplot[color=cnewsizerules, mark=square*, thick] coordinates {(1,0) (2,0) (3,3) (4,2) (5,71)};
+    \addlegendentry{new size-rules}
+    \definecolor{cnewkborules}{HTML}{2ca02c}
+    \addplot[color=cnewkborules, mark=triangle*, thick] coordinates {(1,0) (2,0) (3,3) (4,15) (5,60)};
+    \addlegendentry{new KBO-rules}
+    \definecolor{cnewirreducibles}{HTML}{9467bd}
+    \addplot[color=cnewirreducibles, mark=diamond*, thick] coordinates {(1,1) (2,1) (3,4) (4,8) (5,21)};
+    \addlegendentry{new irreducibles}
+  \end{axis}
+\end{tikzpicture}
+\end{document}

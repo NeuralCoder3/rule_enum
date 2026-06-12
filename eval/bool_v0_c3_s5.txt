@@ -1,0 +1,263 @@
+=== Rule Enumeration Results ===
+Domain: bool, max VCs (k): 3, max size: 5
+
+--- Size 1 (enumerated 1, 0.000s) ---
+  New irreducible: 1
+    A
+  Cumulative: SR=0 KR=0 IR=1 assumed=0 skipped=0
+
+--- Size 2 (enumerated 1, 0.001s) ---
+  New irreducible: 1
+    (~A)
+  Cumulative: SR=0 KR=0 IR=2 assumed=0 skipped=0
+
+--- Size 3 (enumerated 10, 0.001s) ---
+  New irreducible: 4
+    (A^B)
+    (A^A)
+    (A|B)
+    (A&B)
+  Size-reducing rules: 3
+    (A|A)  ->  A
+    (A&A)  ->  A
+    (~(~A))  ->  A
+  KBO-simplifying rules: 3
+    (B|A)  ->  (A|B)
+    (B&A)  ->  (A&B)
+    (B^A)  ->  (A^B)
+  Cumulative: SR=3 KR=3 IR=6 assumed=0 skipped=0
+
+--- Size 4 (enumerated 27, 0.001s) ---
+  New irreducible: 8
+    (B|(~A))
+    (A|(~B))
+    (B&(~A))
+    (A&(~B))
+    (~(A^B))
+    (~(A^A))
+    (~(A|B))
+    (~(A&B))
+  Size-reducing rules: 2
+    ((~A)&A)  ->  (A^A)
+    (A&(~A))  ->  (A^A)
+  KBO-simplifying rules: 15
+    ((~B)&A)  ->  (A&(~B))
+    ((~A)|B)  ->  (B|(~A))
+    ((~A)^A)  ->  (~(A^A))
+    (A^(~A))  ->  (~(A^A))
+    ((~A)|A)  ->  (~(A^A))
+    (A|(~A))  ->  (~(A^A))
+    (~(B&A))  ->  (~(A&B))
+    ((~B)^A)  ->  (~(A^B))
+    ((~A)^B)  ->  (~(A^B))
+    (B^(~A))  ->  (~(A^B))
+    (A^(~B))  ->  (~(A^B))
+    (~(B^A))  ->  (~(A^B))
+    ((~A)&B)  ->  (B&(~A))
+    ((~B)|A)  ->  (A|(~B))
+    (~(B|A))  ->  (~(A|B))
+  Cumulative: SR=5 KR=18 IR=14 assumed=0 skipped=0
+
+--- Size 5 (enumerated 258, 0.004s) ---
+  New irreducible: 21
+    (C^(A|B))
+    (C^(A&B))
+    (B^(A|C))
+    (B^(A&C))
+    (A^(B^C))
+    (A^(B|C))
+    (A^(B&C))
+    (C|(A^B))
+    (C|(A&B))
+    (B|(A^C))
+    (B|(A&C))
+    (A|(B^C))
+    (A|(B|C))
+    (A|(B&C))
+    (C&(A^B))
+    (C&(A|B))
+    (B&(A^C))
+    (B&(A|C))
+    (A&(B^C))
+    (A&(B|C))
+    (A&(B&C))
+  Size-reducing rules: 71
+    ((A&B)^B)  ->  (B&(~A))
+    ((A&B)^A)  ->  (A&(~B))
+    ((A|B)^B)  ->  (A&(~B))
+    ((A|B)^A)  ->  (B&(~A))
+    ((A^A)^A)  ->  A
+    ((B^B)^A)  ->  A
+    ((A^A)^B)  ->  B
+    ((A^B)^B)  ->  A
+    ((A^B)^A)  ->  B
+    ((~A)^(~A))  ->  (A^A)
+    ((~B)^(~A))  ->  (A^B)
+    ((~A)^(~B))  ->  (A^B)
+    (A^(A&B))  ->  (A&(~B))
+    (B^(A&B))  ->  (B&(~A))
+    (A^(A|B))  ->  (B&(~A))
+    (B^(A|B))  ->  (A&(~B))
+    (A^(A^A))  ->  A
+    (A^(A^B))  ->  B
+    (B^(A^A))  ->  B
+    (A^(B^B))  ->  A
+    (B^(A^B))  ->  A
+    ((A&B)|B)  ->  B
+    ((A&B)|A)  ->  A
+    ((A|B)|B)  ->  (A|B)
+    ((A|B)|A)  ->  (A|B)
+    ((A^A)|A)  ->  A
+    ((B^B)|A)  ->  A
+    ((A^A)|B)  ->  B
+    ((A^B)|B)  ->  (A|B)
+    ((A^B)|A)  ->  (A|B)
+    ((~A)|(~A))  ->  (~A)
+    ((~B)|(~A))  ->  (~(A&B))
+    ((~A)|(~B))  ->  (~(A&B))
+    (A|(A&B))  ->  A
+    (B|(A&B))  ->  B
+    (A|(A|B))  ->  (A|B)
+    (B|(A|B))  ->  (A|B)
+    (A|(A^A))  ->  A
+    (A|(A^B))  ->  (A|B)
+    (B|(A^A))  ->  B
+    (A|(B^B))  ->  A
+    (B|(A^B))  ->  (A|B)
+    ((A&B)&B)  ->  (A&B)
+    ((A&B)&A)  ->  (A&B)
+    ((A|B)&B)  ->  B
+    ((A|B)&A)  ->  A
+    ((A^A)&A)  ->  (A^A)
+    ((B^B)&A)  ->  (A^A)
+    ((A^A)&B)  ->  (A^A)
+    ((A^B)&B)  ->  (B&(~A))
+    ((A^B)&A)  ->  (A&(~B))
+    ((~A)&(~A))  ->  (~A)
+    ((~B)&(~A))  ->  (~(A|B))
+    ((~A)&(~B))  ->  (~(A|B))
+    (A&(A&B))  ->  (A&B)
+    (B&(A&B))  ->  (A&B)
+    (A&(A|B))  ->  A
+    (B&(A|B))  ->  B
+    (A&(A^A))  ->  (A^A)
+    (A&(A^B))  ->  (A&(~B))
+    (B&(A^A))  ->  (A^A)
+    (A&(B^B))  ->  (A^A)
+    (B&(A^B))  ->  (B&(~A))
+    (~(~(A&B)))  ->  (A&B)
+    (~(~(A|B)))  ->  (A|B)
+    (~(~(A^A)))  ->  (A^A)
+    (~(~(A^B)))  ->  (A^B)
+    (~(B&(~A)))  ->  (A|(~B))
+    (~(A&(~B)))  ->  (B|(~A))
+    (~(B|(~A)))  ->  (A&(~B))
+    (~(A|(~B)))  ->  (B&(~A))
+  KBO-simplifying rules: 60
+    ((A^C)|B)  ->  (B|(A^C))
+    (B|(C^A))  ->  (B|(A^C))
+    ((B&C)|A)  ->  (A|(B&C))
+    (A|(C&B))  ->  (A|(B&C))
+    ((A&C)|B)  ->  (B|(A&C))
+    (B|(C&A))  ->  (B|(A&C))
+    ((A^B)|C)  ->  (C|(A^B))
+    (C|(B^A))  ->  (C|(A^B))
+    ((B|C)|A)  ->  (A|(B|C))
+    ((A|C)|B)  ->  (A|(B|C))
+    ((A|B)|C)  ->  (A|(B|C))
+    (C|(A|B))  ->  (A|(B|C))
+    (B|(A|C))  ->  (A|(B|C))
+    (A|(C|B))  ->  (A|(B|C))
+    (B|(C|A))  ->  (A|(B|C))
+    (C|(B|A))  ->  (A|(B|C))
+    ((A|B)^C)  ->  (C^(A|B))
+    (C^(B|A))  ->  (C^(A|B))
+    ((B^C)^A)  ->  (A^(B^C))
+    ((A^C)^B)  ->  (A^(B^C))
+    ((A^B)^C)  ->  (A^(B^C))
+    (C^(A^B))  ->  (A^(B^C))
+    (B^(A^C))  ->  (A^(B^C))
+    (A^(C^B))  ->  (A^(B^C))
+    (B^(C^A))  ->  (A^(B^C))
+    (C^(B^A))  ->  (A^(B^C))
+    ((B&C)^A)  ->  (A^(B&C))
+    (A^(C&B))  ->  (A^(B&C))
+    ((A&B)|C)  ->  (C|(A&B))
+    (C|(B&A))  ->  (C|(A&B))
+    ((B^C)|A)  ->  (A|(B^C))
+    (A|(C^B))  ->  (A|(B^C))
+    ((A^B)&C)  ->  (C&(A^B))
+    (C&(B^A))  ->  (C&(A^B))
+    ((A|C)^B)  ->  (B^(A|C))
+    (B^(C|A))  ->  (B^(A|C))
+    ((B|C)&A)  ->  (A&(B|C))
+    (A&(C|B))  ->  (A&(B|C))
+    ((B|C)^A)  ->  (A^(B|C))
+    (A^(C|B))  ->  (A^(B|C))
+    ((B^C)&A)  ->  (A&(B^C))
+    (A&(C^B))  ->  (A&(B^C))
+    ((A|C)&B)  ->  (B&(A|C))
+    (B&(C|A))  ->  (B&(A|C))
+    ((A&C)^B)  ->  (B^(A&C))
+    (B^(C&A))  ->  (B^(A&C))
+    ((A&B)^C)  ->  (C^(A&B))
+    (C^(B&A))  ->  (C^(A&B))
+    ((A|B)&C)  ->  (C&(A|B))
+    (C&(B|A))  ->  (C&(A|B))
+    ((A^C)&B)  ->  (B&(A^C))
+    (B&(C^A))  ->  (B&(A^C))
+    ((B&C)&A)  ->  (A&(B&C))
+    ((A&C)&B)  ->  (A&(B&C))
+    ((A&B)&C)  ->  (A&(B&C))
+    (C&(A&B))  ->  (A&(B&C))
+    (B&(A&C))  ->  (A&(B&C))
+    (A&(C&B))  ->  (A&(B&C))
+    (B&(C&A))  ->  (A&(B&C))
+    (C&(B&A))  ->  (A&(B&C))
+  Cumulative: SR=76 KR=78 IR=35 assumed=0 skipped=0
+
+=== Final totals (0.0s) ===
+Size-reducing: 76
+KBO-simplifying: 78
+Irreducible:   35
+
+=== Assumed (unproven) equivalences: 0 ===
+
+=== Skipped (unproven, not assumed) equivalences: 0 ===
+
+=== Irreducible terms (by size) ===
+  [size 1] A
+  [size 2] (~A)
+  [size 3] (A&B)
+  [size 3] (A|B)
+  [size 3] (A^A)
+  [size 3] (A^B)
+  [size 4] (~(A&B))
+  [size 4] (~(A|B))
+  [size 4] (~(A^A))
+  [size 4] (~(A^B))
+  [size 4] (A&(~B))
+  [size 4] (B&(~A))
+  [size 4] (A|(~B))
+  [size 4] (B|(~A))
+  [size 5] (A&(B&C))
+  [size 5] (A&(B|C))
+  [size 5] (A&(B^C))
+  [size 5] (B&(A|C))
+  [size 5] (B&(A^C))
+  [size 5] (C&(A|B))
+  [size 5] (C&(A^B))
+  [size 5] (A|(B&C))
+  [size 5] (A|(B|C))
+  [size 5] (A|(B^C))
+  [size 5] (B|(A&C))
+  [size 5] (B|(A^C))
+  [size 5] (C|(A&B))
+  [size 5] (C|(A^B))
+  [size 5] (A^(B&C))
+  [size 5] (A^(B|C))
+  [size 5] (A^(B^C))
+  [size 5] (B^(A&C))
+  [size 5] (B^(A|C))
+  [size 5] (C^(A&B))
+  [size 5] (C^(A|B))

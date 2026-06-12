@@ -1,0 +1,27 @@
+Domain: bool,  max VCs (k): 3,  max vars: 0,  max holes: 3,  random inputs: 0,  max size: 100,  jobs: 4,  smt: false,  smt-forced: false,  safe-mode: false
+
+Size 1  [0.0s / 0.0s]  enum=1  +SR=0  +KR=0  +IR=1  total: SR=0 KR=0 IR=1
+Size 2  [0.0s / 0.0s]  enum=1  +SR=0  +KR=0  +IR=1  total: SR=0 KR=0 IR=2
+Size 3  [0.0s / 0.0s]  enum=10  +SR=3  +KR=3  +IR=4  total: SR=3 KR=3 IR=6
+Size 4  [0.0s / 0.0s]  enum=27  +SR=2  +KR=15  +IR=8  total: SR=5 KR=18 IR=14
+Size 5  [0.0s / 0.0s]  enum=258  +SR=71  +KR=60  +IR=21  total: SR=76 KR=78 IR=35
+Size 6  [0.0s / 0.0s]  enum=741  +SR=156  +KR=183  +IR=81  total: SR=232 KR=261 IR=116
+Size 7  [0.1s / 0.0s]  enum=4846  +SR=843  +KR=97  +IR=43  total: SR=1075 KR=358 IR=159
+Size 8  [0.2s / 0.2s]  enum=15193  +SR=2736  +KR=323  +IR=43  total: SR=3811 KR=681 IR=202
+Size 9  [0.5s / 0.4s]  enum=45605  +SR=4825  +KR=218  +IR=18  total: SR=8636 KR=899 IR=220
+Size 10  [1.9s / 1.7s]  enum=140609  +SR=10146  +KR=288  +IR=12  total: SR=18782 KR=1187 IR=232
+Size 11  [7.4s / 6.2s]  enum=339519  +SR=17193  +KR=0  +IR=0  total: SR=35975 KR=1187 IR=232
+Size 12  [57.9s / 51.9s]  enum=958638  +SR=20034  +KR=0  +IR=0  total: SR=56009 KR=1187 IR=232
+Size 13  [291.9s / 235.5s]  enum=1741617  +SR=32805  +KR=0  +IR=0  total: SR=88814 KR=1187 IR=232
+Size 14  [519.8s / 230.0s]  enum=1980540  +SR=29772  +KR=0  +IR=0  total: SR=118586 KR=1187 IR=232
+Size 15  [1013.9s / 495.6s]  enum=2428107  +SR=30441  +KR=0  +IR=0  total: SR=149027 KR=1187 IR=232
+Size 16  [1360.8s / 348.5s]  enum=2395410  +SR=21354  +KR=0  +IR=0  total: SR=170381 KR=1187 IR=232
+Size 17  [1845.4s / 486.6s]  enum=2183142  +SR=16023  +KR=0  +IR=0  total: SR=186404 KR=1187 IR=232
+Size 18  [2082.5s / 238.7s]  enum=1354908  +SR=7740  +KR=0  +IR=0  total: SR=194144 KR=1187 IR=232
+Size 19  [2314.1s / 232.0s]  enum=966465  +SR=4068  +KR=0  +IR=0  total: SR=198212 KR=1187 IR=232
+Size 20  [2373.7s / 60.2s]  enum=487968  +SR=1296  +KR=0  +IR=0  total: SR=199508 KR=1187 IR=232
+Size 21  [2412.7s / 38.9s]  enum=210816  +SR=432  +KR=0  +IR=0  total: SR=199940 KR=1187 IR=232
+
+Final [2535.1s]: SR=199940  KR=1187  IR=232
+Saved 201127 rules to eval/bool_v0c3.rules
+Saved 232 irreducibles to eval/bool_v0c3.irs

@@ -1,0 +1,6 @@
+size,enumerated,new_size_rules,new_kbo_rules,new_irreducibles,total_size_rules,total_kbo_rules,total_irreducible,time_total,time_cumulative
+1,1,0,0,1,0,0,1,0.0,0.0
+2,1,0,0,1,0,0,2,0.0,0.0
+3,10,3,3,4,3,3,6,0.0,0.0
+4,27,2,15,8,5,18,14,0.0,0.0
+5,258,71,60,21,76,78,35,0.0,0.0

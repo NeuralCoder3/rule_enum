@@ -1,0 +1,16 @@
+Domain: bool,  max VCs (k): 3,  max vars: 3,  max holes: 3,  random inputs: 0,  max size: 100,  jobs: 4,  smt: false,  smt-forced: false,  safe-mode: false
+
+Size 1  [0.0s / 0.0s]  enum=2  +SR=0  +KR=0  +IR=2  total: SR=0 KR=0 IR=2
+Size 2  [0.0s / 0.0s]  enum=2  +SR=0  +KR=0  +IR=2  total: SR=0 KR=0 IR=4
+Size 3  [0.0s / 0.0s]  enum=23  +SR=3  +KR=3  +IR=10  total: SR=3 KR=3 IR=14
+Size 4  [0.0s / 0.0s]  enum=60  +SR=2  +KR=27  +IR=22  total: SR=5 KR=30 IR=36
+Size 5  [0.0s / 0.0s]  enum=561  +SR=73  +KR=119  +IR=79  total: SR=78 KR=149 IR=115
+Size 6  [0.0s / 0.0s]  enum=1767  +SR=60  +KR=119  +IR=250  total: SR=138 KR=268 IR=365
+Size 7  [0.1s / 0.1s]  enum=11154  +SR=413  +KR=206  +IR=168  total: SR=551 KR=474 IR=533
+Size 8  [0.3s / 0.3s]  enum=35689  +SR=1067  +KR=528  +IR=235  total: SR=1618 KR=1002 IR=768
+Size 9  [0.8s / 0.7s]  enum=105706  +SR=1212  +KR=381  +IR=119  total: SR=2830 KR=1383 IR=887
+Size 10  [2.9s / 2.8s]  enum=326795  +SR=3987  +KR=581  +IR=185  total: SR=6817 KR=1964 IR=1072
+Size 11  [12.0s / 10.7s]  enum=844810  +SR=5223  +KR=159  +IR=82  total: SR=12040 KR=2123 IR=1154
+Size 12  [84.4s / 76.2s]  enum=2354238  +SR=11421  +KR=94  +IR=32  total: SR=23461 KR=2217 IR=1186
+Size 13  [449.3s / 370.8s]  enum=4406418  +SR=15445  +KR=25  +IR=9  total: SR=38906 KR=2242 IR=1195
+Size 14  [832.2s / 393.7s]  enum=5878465  +SR=22621  +KR=1  +IR=1  total: SR=61527 KR=2243 IR=1196
