@@ -159,5 +159,10 @@ dune build --profile=release bin/main.exe && ./_build/default/bin/main.exe $@
 #     \item with variables vs holes only: system comparison
 #     \item with variables vs holes only: optimization potential (optional)
 # 
-# egglog
-# 
+
+# Summary:
+# Time to synthesis (for 3 domains + compare no vars)
+# ... (TODO)
+
+
+
