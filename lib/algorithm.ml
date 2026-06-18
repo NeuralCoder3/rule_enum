@@ -21,9 +21,6 @@
 
    Single-threaded throughout. *)
 
-let rec list_compare elt_compare a b = match a, b with
-  | [], [] -> 0 | [], _ -> -1 | _, [] -> 1
-  | x :: xs, y :: ys -> match elt_compare x y with 0 -> list_compare elt_compare xs ys | c -> c
 
 let rec list_equal eq a b = match a, b with
   | [], [] -> true | x :: xs, y :: ys -> eq x y && list_equal eq xs ys | _ -> false
@@ -298,9 +295,6 @@ let confirm_equiv ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
   | Proven | Assumed -> true
   | Unproven | Not_equiv -> false
 
-(* O(n) group via Hashtbl keyed by the bv. The `cmp` arg is unused — we
-   rely on Hashtbl's structural hashing / equality (bv keys are
-   `'a list` of equality-comparable values). *)
 (* Group values by an exact key. The keys here are behaviour vectors —
    arrays of length = #inputs (often hundreds). OCaml's default Hashtbl
    hashes only ~10 nodes, so vectors sharing a prefix all collide into one
@@ -309,7 +303,7 @@ let confirm_equiv ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
    bucket by a STRONG hash (`hash_param` over the full vector) into an
    int-keyed table, then split each bucket by exact `=`. Hashing is O(len)
    once per value; equality runs only on genuine hash collisions. *)
-let group_by _cmp key_of_value values =
+let group_by key_of_value values =
   let h : (int, ('k * 'v list ref) list ref) Hashtbl.t =
     Hashtbl.create (max 16 (List.length values)) in
   List.iter (fun v ->
@@ -367,7 +361,7 @@ let exact_table (dom : ('s, 'a) Domain.t) t : 'a array =
    and so don't survive as candidates. A pairwise reconcile would be exact
    but is O(classes²) and quadratically slow on big buckets.) *)
 let exact_subgroups (dom : ('s, 'a) Domain.t) term_triples =
-  group_by () (fun (t, _, _) -> exact_table dom t) term_triples
+  group_by (fun (t, _, _) -> exact_table dom t) term_triples
   |> List.map snd
 
 (* Detailed per-iteration counts surfaced in --info mode. *)
@@ -813,12 +807,14 @@ let get_pool n =
     pool_ref := Some p;
     p
 
-let parallel_filter_map ~num_domains f lst =
+(* Split `lst` into ~num_domains contiguous chunks, run `per_chunk` on each
+   over the worker pool, and concatenate the results in order. Falls back to
+   `seq lst` when there's one worker or the list is below `threshold`. *)
+let parallel_chunks ~num_domains ~threshold ~per_chunk ~seq lst =
   let len = List.length lst in
-  let nd = num_domains in
-  if nd <= 1 || len < parallel_threshold * 2 then List.filter_map f lst
+  if num_domains <= 1 || len < threshold then seq lst
   else
-    let chunk_size = (len + nd - 1) / nd in
+    let chunk_size = (len + num_domains - 1) / num_domains in
     let rec take n acc = function
       | [] -> (List.rev acc, [])
       | rest when n <= 0 -> (List.rev acc, rest)
@@ -827,32 +823,21 @@ let parallel_filter_map ~num_domains f lst =
       | [] -> List.rev acc
       | rest -> let ch, rem = take chunk_size [] rest in split (ch :: acc) rem in
     let chunks = Array.of_list (split [] lst) in
-    let pool = get_pool nd in
-    let thunks = Array.map (fun ch () -> List.filter_map f ch) chunks in
-    List.concat (Array.to_list (Pool.run pool thunks))
+    let thunks = Array.map (fun ch () -> per_chunk ch) chunks in
+    List.concat (Array.to_list (Pool.run (get_pool num_domains) thunks))
+
+let parallel_filter_map ~num_domains f =
+  parallel_chunks ~num_domains ~threshold:(parallel_threshold * 2)
+    ~per_chunk:(List.filter_map f) ~seq:(List.filter_map f)
 
 (* Order-preserving parallel map over the pool. Used to parallelize rule
    confirmation when the equivalence oracle is the pure exhaustive one
    (`fully_exhaustive`): unlike Z3 (which serializes on its global memory
    manager), exhaustive eval has no shared state, so this scales. `f` must
    be pure apart from benign stat-counter increments. *)
-let parallel_map ~num_domains f lst =
-  let len = List.length lst in
-  let nd = num_domains in
-  if nd <= 1 || len < 256 then List.map f lst
-  else
-    let chunk_size = (len + nd - 1) / nd in
-    let rec take n acc = function
-      | [] -> (List.rev acc, [])
-      | rest when n <= 0 -> (List.rev acc, rest)
-      | x :: xs -> take (n - 1) (x :: acc) xs in
-    let rec split acc = function
-      | [] -> List.rev acc
-      | rest -> let ch, rem = take chunk_size [] rest in split (ch :: acc) rem in
-    let chunks = Array.of_list (split [] lst) in
-    let pool = get_pool nd in
-    let thunks = Array.map (fun ch () -> List.map f ch) chunks in
-    List.concat (Array.to_list (Pool.run pool thunks))
+let parallel_map ~num_domains f =
+  parallel_chunks ~num_domains ~threshold:256
+    ~per_chunk:(List.map f) ~seq:(List.map f)
 
 (* Per-subpass decision tally for --info: (reducible, size, kbo,
    dup_skip, candidate). `reducible` = enumerated terms that a rule
@@ -1007,7 +992,6 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let candidates_raw_count = List.length candidates in
   let t_process = Sys.time () -. t_start -. t_enum in
   let new_irreducibles = ref [] in
-  let cmp = list_compare dom.Domain.compare in
   let t_dedup = Sys.time () in
   let candidates =
     let seen = Hashtbl.create (List.length candidates) in
@@ -1018,7 +1002,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
   let candidates_dedup_count = List.length candidates in
   prof_label (Printf.sprintf "dedup (%d cands)" candidates_dedup_count) (Sys.time () -. t_dedup);
   let t_group = Sys.time () in
-  let groups = group_by cmp (fun (_, bv, _) -> bv) candidates in
+  let groups = group_by (fun (_, bv, _) -> bv) candidates in
   let n_bv_groups = List.length groups in
   prof_label (Printf.sprintf "group_by (%d groups)" n_bv_groups) (Sys.time () -. t_group);
   (* SMT-driven subgrouping: within each bv-bucket, Tier 2 (cross-eval
@@ -1035,26 +1019,28 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
     let subgroup_one (bv, term_triples) =
       Progress.tick ();
       match term_triples with [] -> [] | first :: rest ->
-      let groups = ref [[first]] in
+      (* Each subgroup is a mutable cell so placing a triple is O(1) (prepend
+         in place) rather than rebuilding the whole subgroup list. New
+         subgroups are prepended, and the search scans front-to-back for the
+         first confirmed-equivalent rep — same order and membership as before. *)
+      let groups = ref [ref [first]] in
       List.iter (fun ((t, _, t_ex) as triple) ->
-        let idx = ref (-1) in
+        let placed = ref false in
         let unproven_rep = ref None in
-        List.iteri (fun i g ->
-          if !idx = -1 then
-            let (rep, _, rep_ex) = List.hd g in
+        List.iter (fun g ->
+          if not !placed then
+            let (rep, _, rep_ex) = List.hd !g in
             (* smt_ok=false ⇔ run on the worker pool (fully_exhaustive):
                must not reach Z3. Harmless when sequential (None won't
                occur for in-budget genuine equivalences). *)
             match confirm_verdict ~smt_ok:(not fully_exhaustive)
                     ~assume_unproven:rs.assume_unproven ~use_smt ~smt_vars
                     dom t t_ex rep rep_ex with
-            | Proven | Assumed -> idx := i
+            | Proven | Assumed -> g := triple :: !g; placed := true
             | Unproven -> if !unproven_rep = None then unproven_rep := Some rep
             | Not_equiv -> ())
           !groups;
-        match !idx with
-        | i when i >= 0 -> groups := List.mapi (fun j g -> if j = i then triple :: g else g) !groups
-        | _ ->
+        if not !placed then begin
           (* t stays in its own subgroup. If it was kept separate from a
              random-equivalent rep only because SMT couldn't decide
              (Unproven, safe mode), log the declined equation (oriented by
@@ -1064,9 +1050,10 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
              let r = if Kbo.compare_total sym_cmp rep t <= 0 then (t, rep) else (rep, t) in
              rs.skipped_rules <- r :: rs.skipped_rules
            | None -> ());
-          groups := [triple] :: !groups)
+          groups := ref [triple] :: !groups
+        end)
         rest;
-      List.map (fun g -> (bv, g)) !groups
+      List.map (fun g -> (bv, !g)) !groups
     in
     (* On a small finite domain, split each bv-bucket EXACTLY via per-term
        truth-tables: O(n) hash + cheap rep reconcile, instead of the
@@ -1183,41 +1170,25 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
          form uses Holes; thanks to match_var_const accepting Var as a
          size-0 image, the rule still fires on var-containing targets
          at normalize time. *)
-    let collect_holes t =
-      let h = Hashtbl.create 4 in
+    (* Distinct Var ids (is_hole=false) or Hole ids (is_hole=true) in `t`. *)
+    let collect_ids ~is_hole t =
+      let s = Hashtbl.create 4 in
       let rec go = function
-        | Types.Hole n -> Hashtbl.replace h n ()
-        | Types.Var _ -> ()
+        | Types.Var v -> if not is_hole then Hashtbl.replace s v ()
+        | Types.Hole n -> if is_hole then Hashtbl.replace s n ()
         | Types.Node (_, args) -> List.iter go args
       in go t;
-      Hashtbl.fold (fun k () acc -> k :: acc) h []
+      Hashtbl.fold (fun k () acc -> k :: acc) s []
     in
-    let holes_subset_le rhs lhs =
-      let lhs_holes = List.sort_uniq compare (collect_holes lhs) in
-      let rhs_holes = List.sort_uniq compare (collect_holes rhs) in
-      List.for_all (fun h -> List.mem h lhs_holes) rhs_holes
+    (* Every leaf id (of the given kind) in `rhs` also occurs in `lhs` — the
+       regularity check that keeps an emitted rule from introducing a fresh
+       var/hole on its right-hand side. *)
+    let ids_subset ~is_hole rhs lhs =
+      let lhs_ids = collect_ids ~is_hole lhs in
+      List.for_all (fun k -> List.mem k lhs_ids) (collect_ids ~is_hole rhs)
     in
-    let var_set_le rhs lhs =
-      let lhs_vars =
-        let s = Hashtbl.create 4 in
-        let rec go = function
-          | Types.Var v -> Hashtbl.replace s v ()
-          | Types.Hole _ -> ()
-          | Types.Node (_, args) -> List.iter go args
-        in go lhs;
-        Hashtbl.fold (fun k () acc -> k :: acc) s []
-      in
-      let rhs_vars =
-        let s = Hashtbl.create 4 in
-        let rec go = function
-          | Types.Var v -> Hashtbl.replace s v ()
-          | Types.Hole _ -> ()
-          | Types.Node (_, args) -> List.iter go args
-        in go rhs;
-        Hashtbl.fold (fun k () acc -> k :: acc) s []
-      in
-      List.for_all (fun v -> List.mem v lhs_vars) rhs_vars
-    in
+    let holes_subset_le rhs lhs = ids_subset ~is_hole:true rhs lhs in
+    let var_set_le rhs lhs = ids_subset ~is_hole:false rhs lhs in
     List.iter (fun (other_t, _, other_ex, other_anon, _) ->
       (* Skip only the winner's own (source, anon) entry. Orbit expansion
          produces multiple entries with the same source `t` but different

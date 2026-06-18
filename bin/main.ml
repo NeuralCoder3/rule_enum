@@ -1,3 +1,8 @@
+(* One indented `lhs  ->  rhs` line per rule, into the report file. *)
+let fprint_rules oc to_str rules =
+  List.iter (fun (l, r) ->
+    Printf.fprintf oc "    %s  ->  %s\n" (to_str l) (to_str r)) rules
+
 let write_header oc_header oc_report domain_name max_vcs max_size =
   (match oc_header with Some oc ->
      Printf.fprintf oc "size,enumerated,new_size_rules,new_kbo_rules,new_irreducibles,total_size_rules,total_kbo_rules,total_irreducible,time_total,time_enum,time_process,time_apply,time_group\n";
@@ -22,22 +27,18 @@ let write_iteration ?oc_header ?oc_report to_str (s : 's Rule_enum.Algorithm.ite
         List.iter (fun t -> Printf.fprintf oc "    %s\n" (to_str t)) s.new_irreducibles
      end;
      if nsr > 0 then begin Printf.fprintf oc "  Size-reducing rules: %d\n" nsr;
-       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (to_str l) (to_str r)) s.new_size_rules end;
+       fprint_rules oc to_str s.new_size_rules end;
      if nkr > 0 then begin Printf.fprintf oc "  KBO-simplifying rules: %d\n" nkr;
-       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (to_str l) (to_str r)) s.new_kbo_rules end;
+       fprint_rules oc to_str s.new_kbo_rules end;
      (* Unproven equivalences (SMT Unknown, passed random) decided this
         iteration: assumed = added on random confidence; skipped = declined
         under safe mode. *)
      if s.new_assumed <> [] then begin
        Printf.fprintf oc "  Assumed (unproven, added): %d\n" (List.length s.new_assumed);
-       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (to_str l) (to_str r)) s.new_assumed end;
+       fprint_rules oc to_str s.new_assumed end;
      if s.new_skipped <> [] then begin
        Printf.fprintf oc "  Skipped (unproven, not added): %d\n" (List.length s.new_skipped);
-       List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-         (to_str l) (to_str r)) s.new_skipped end;
+       fprint_rules oc to_str s.new_skipped end;
      Printf.fprintf oc "  Cumulative: SR=%d KR=%d IR=%d assumed=%d skipped=%d\n\n"
        s.total_size_rules s.total_kbo_rules s.total_irreducible
        s.total_assumed s.total_skipped;
@@ -56,8 +57,7 @@ let write_footer oc_report to_str total_elapsed (rs : _) =
       (List.length assumed);
     if assumed <> [] then
       Printf.fprintf oc "(SMT could not prove these; accepted on random confidence. Re-run with --safe-mode to exclude them.)\n";
-    List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-      (to_str l) (to_str r)) assumed;
+    fprint_rules oc to_str assumed;
     (* Candidate equivalences skipped in safe mode — SMT returned Unknown,
        random could not refute, and we declined to assume them. *)
     let skipped = List.rev rs.Rule_enum.Algorithm.skipped_rules in
@@ -65,8 +65,7 @@ let write_footer oc_report to_str total_elapsed (rs : _) =
       (List.length skipped);
     if skipped <> [] then
       Printf.fprintf oc "(SMT could not prove these and random could not refute them; not emitted under --safe-mode. Drop --safe-mode, raise --smt-unknown-inputs, or RULE_ENUM_SMT_TIMEOUT_MS to resolve.)\n";
-    List.iter (fun (l, r) -> Printf.fprintf oc "    %s  ->  %s\n"
-      (to_str l) (to_str r)) skipped;
+    fprint_rules oc to_str skipped;
     Printf.fprintf oc "\n=== Irreducible terms (by size) ===\n";
     let sorted = List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors
                  |> List.sort (fun a b -> compare (Rule_enum.Types.size a) (Rule_enum.Types.size b))
@@ -317,48 +316,26 @@ let () =
      by sorted-id), giving a complete set of reassociation/commutativity
      rules. With max_holes=0 enumeration is var-only and constP rules are
      synthesized post-hoc from var equivalences — faster but incomplete. *)
+  (* All domains share the same wiring; only the domain value, its forced
+     inputs, and the name differ. The locally-abstract types (sym, a) let
+     one helper serve every domain despite their distinct symbol/value
+     types. *)
+  let dispatch : type sym a.
+      (sym, a) Rule_enum.Domain.t -> a Rule_enum.Eval.input list -> string -> unit =
+    fun dom forced name ->
+      run_with dom forced num_rand
+        ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
+        ~num_domains:!jobs ~domain_name:name
+        ~output_file:!output_file ~stats_file:!stats_file
+        ~rule_output:!rule_output ~irred_output:!irred_output
+        ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
+        ~assume_unproven:(not !safe_mode) ~unknown_inputs ~info:!info
+        ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
+  in
   match !domain_name with
-  | "int" -> run_with Rule_enum.Domain_int.int_domain [] num_rand
-      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~num_domains:!jobs ~domain_name:"int"
-      ~output_file:!output_file ~stats_file:!stats_file
-      ~rule_output:!rule_output ~irred_output:!irred_output
-      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
-      ~assume_unproven:(not !safe_mode)
-      ~unknown_inputs
-      ~info:!info
-      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
-  | "bv" -> run_with Rule_enum.Domain_bv.bv_domain [] num_rand
-      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~num_domains:!jobs ~domain_name:"bv"
-      ~output_file:!output_file ~stats_file:!stats_file
-      ~rule_output:!rule_output ~irred_output:!irred_output
-      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
-      ~assume_unproven:(not !safe_mode)
-      ~unknown_inputs
-      ~info:!info
-      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
-  | "bool" ->
-    let dom = Rule_enum.Domain_bool.bool_domain in
-    let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
-    run_with dom forced num_rand
-      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~num_domains:!jobs ~domain_name:"bool"
-      ~output_file:!output_file ~stats_file:!stats_file
-      ~rule_output:!rule_output ~irred_output:!irred_output
-      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
-      ~assume_unproven:(not !safe_mode)
-      ~unknown_inputs
-      ~info:!info
-      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
-  | "demo" -> run_with Rule_enum.Domain_demo.demo_domain [] num_rand
-      ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
-      ~num_domains:!jobs ~domain_name:"demo"
-      ~output_file:!output_file ~stats_file:!stats_file
-      ~rule_output:!rule_output ~irred_output:!irred_output
-      ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
-      ~assume_unproven:(not !safe_mode)
-      ~unknown_inputs
-      ~info:!info
-      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
+  | "int"  -> dispatch Rule_enum.Domain_int.int_domain [] "int"
+  | "bv"   -> dispatch Rule_enum.Domain_bv.bv_domain [] "bv"
+  | "bool" -> dispatch Rule_enum.Domain_bool.bool_domain
+                (if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else []) "bool"
+  | "demo" -> dispatch Rule_enum.Domain_demo.demo_domain [] "demo"
   | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, bool, or demo)\n" !domain_name; exit 1
