@@ -1225,6 +1225,35 @@ let test_dead_hole_reduction () =
   Printf.printf "  dead-hole reduction (cancelling constP): OK (%d witnesses reduced)\n"
     (List.length witnesses)
 
+(* Verified rule-set minimization: the post-pass must (a) shrink the rule
+   set (the demo `+`/`0` domain produces many AC combination rules) and
+   (b) preserve EVERY normal form on the verified term universe. Part (b)
+   is re-checked here independently of the minimizer's own internal check
+   — a guard against the unsound shortcuts (forward-collapse, subsumption)
+   that broke confluence. *)
+let test_minimize_rules () =
+  Random.init 3;
+  let k = 3 in
+  let sym_cmp = Domain_demo.compare_symbol in
+  let all_symbols = Domain_demo.all_symbols in
+  let verify_size = 8 in
+  let rs, _ = Algorithm.run ~max_size:6 Domain_demo.demo_domain ~num_domains:1
+    ~num_random_inputs:200 ~max_vcs:k ~max_holes:k ~use_smt:true in
+  let full = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let minimal = Algorithm.minimize_rules ~sym_cmp ~all_symbols ~k ~verify_size full in
+  assert (List.length minimal < List.length full);
+  let terms = ref [] in
+  for sz = 1 to verify_size do
+    terms := Algorithm.ground_terms_of_size all_symbols ~k sz @ !terms
+  done;
+  let fi = Rewrite.index_rules full and mi = Rewrite.index_rules minimal in
+  let mismatches = List.filter (fun t ->
+    not (Types.term_eq sym_cmp (Rewrite.norm_bottom ~sym_cmp ~index:fi t)
+                               (Rewrite.norm_bottom ~sym_cmp ~index:mi t))) !terms in
+  assert (mismatches = []);
+  Printf.printf "  minimize-rules (verified NF-preserving): OK (%d -> %d rules, %d terms unchanged)\n"
+    (List.length full) (List.length minimal) (List.length !terms)
+
 (* Tier 2 must short-circuit some SMT calls when cells are populated.
    At rand=1 size 5 we observe ~50% short-circuit; this asserts the
    cells-accumulate-then-cross-eval path actually fires. *)
@@ -1328,6 +1357,7 @@ let () = Printf.printf "Running tests...\n";
   test_full_soundness_and_completeness ();
   test_all_possible_terms_soundness_and_confluence ();
   test_dead_hole_reduction ();
+  test_minimize_rules ();
   test_tier2_accumulates_and_short_circuits ();
   test_algorithm_int (); test_algorithm_bool (); test_size_progression ();
   test_forced_inputs (); test_all_bool_inputs ();

@@ -77,7 +77,8 @@ let write_footer oc_report to_str total_elapsed (rs : _) =
 let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
-      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info ~progress =
+      ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info ~progress
+      ~minimize ~minimize_size =
   let to_str = dom.Rule_enum.Domain.term_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
@@ -178,10 +179,22 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
   (* Final snapshot guarantees the files exist even if no iteration ran;
      otherwise this just re-confirms the last per-iteration write. *)
   write_outputs rs;
-  if rule_output <> "" then
-    Printf.printf "Saved %d rules to %s\n%!"
-      (List.length rs.Rule_enum.Algorithm.size_rules
-       + List.length rs.Rule_enum.Algorithm.kbo_rules) rule_output;
+  if rule_output <> "" then begin
+    let full = rs.Rule_enum.Algorithm.size_rules @ rs.Rule_enum.Algorithm.kbo_rules in
+    if minimize then begin
+      let verify_size = if minimize_size > 0 then minimize_size else max_size + 2 in
+      Printf.printf "Minimizing %d rules (verified NF-preserving on ground terms <= size %d)...\n%!"
+        (List.length full) verify_size;
+      let minimal = Rule_enum.Algorithm.minimize_rules
+          ~sym_cmp:dom.Rule_enum.Domain.sym_compare
+          ~all_symbols:dom.Rule_enum.Domain.all_symbols
+          ~k:max_vcs ~verify_size full in
+      Rule_enum.Parse.save_rules to_str rule_output minimal;
+      Printf.printf "Minimized %d -> %d rules, saved to %s\n%!"
+        (List.length full) (List.length minimal) rule_output
+    end else
+      Printf.printf "Saved %d rules to %s\n%!" (List.length full) rule_output
+  end;
   if irred_output <> "" then
     Printf.printf "Saved %d irreducibles to %s\n%!"
       (List.length rs.Rule_enum.Algorithm.behaviors) irred_output
@@ -243,6 +256,8 @@ let () =
   let safe_mode = ref false in
   let info = ref (try Sys.getenv "RULE_ENUM_INFO" = "1" with Not_found -> false) in
   let progress = ref false in
+  let minimize = ref false in
+  let minimize_size = ref 0 in
   (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
   let smt_unknown_inputs = ref (-1) in
   let rule_output = ref "" in let irred_output = ref "" in
@@ -267,6 +282,8 @@ let () =
     ("--safe-mode", Arg.Set safe_mode, " Do not assume unproven equivalences: when SMT returns Unknown and random can't refute, keep terms distinct (no rule)");
     ("--info", Arg.Set info, " Print detailed per-iteration counts (reducible/skipped terms, decision breakdown, SMT/tier activity). Also via RULE_ENUM_INFO=1");
     ("--progress", Arg.Set progress, " Show a progress bar (on a TTY) during each iteration, by enumerated terms processed");
+    ("--minimize-rules", Arg.Set minimize, " Post-pass: drop rules that are redundant (verified to preserve every normal form on ground terms up to the verify size). Shrinks --rule-output; does not speed up synthesis.");
+    ("--minimize-size", Arg.Set_int minimize_size, " N  Ground-term size bound for --minimize-rules verification (default: max-size + 2)");
     ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
     ("--rule-output", Arg.Set_string rule_output, " FILE  Save rules (one per line) in load-able format");
     ("--irred-output", Arg.Set_string irred_output, " FILE  Save irreducibles (one per line) in load-able format");
@@ -310,7 +327,7 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
-      ~progress:!progress
+      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
   | "bv" -> run_with Rule_enum.Domain_bv.bv_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
       ~num_domains:!jobs ~domain_name:"bv"
@@ -320,7 +337,7 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
-      ~progress:!progress
+      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
   | "bool" ->
     let dom = Rule_enum.Domain_bool.bool_domain in
     let forced = if !use_full then Rule_enum.Domain_bool.all_inputs !max_vcs else [] in
@@ -333,7 +350,7 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
-      ~progress:!progress
+      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
   | "demo" -> run_with Rule_enum.Domain_demo.demo_domain [] num_rand
       ~max_size:!max_size ~max_vcs:!max_vcs ~max_vars:mv ~max_holes:mh
       ~num_domains:!jobs ~domain_name:"demo"
@@ -343,5 +360,5 @@ let () =
       ~assume_unproven:(not !safe_mode)
       ~unknown_inputs
       ~info:!info
-      ~progress:!progress
+      ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
   | _ -> Printf.eprintf "Unknown domain: %s (use int, bv, bool, or demo)\n" !domain_name; exit 1

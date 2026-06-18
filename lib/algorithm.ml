@@ -1383,3 +1383,73 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
 
 (* Expose resolution for callers that need to print the actual job count. *)
 let effective_num_workers = resolve_num_workers
+
+(* All ground terms (the k holes + 0-arity symbols, combined with the
+   operators) of exactly `size` — the application-time term universe under
+   Mapping A. Vars never appear in user terms, and a var in a rule LHS
+   binds to any of these ground subterms, so this universe exercises both
+   hole- and var-rules. *)
+let rec ground_terms_of_size all_symbols ~k size =
+  if size <= 0 then []
+  else if size = 1 then
+    List.init k (fun i -> Types.mk_hole i)
+    @ List.filter_map (fun (_, ar, s) -> if ar = 0 then Some (Types.mk_node s []) else None) all_symbols
+  else begin
+    let acc = ref [] in
+    List.iter (fun (_, arity, sym) ->
+      if arity > 0 then
+        List.iter (fun arg_sizes ->
+          let per = List.map (ground_terms_of_size all_symbols ~k) arg_sizes in
+          if List.for_all (fun l -> l <> []) per then
+            List.iter (fun args -> acc := Types.mk_node sym args :: !acc) (Enum.product per))
+          (Enum.partitions (size - 1) arity))
+      all_symbols;
+    !acc
+  end
+
+(* Verified rule-set minimization (post-pass): drop a rule only when its
+   removal leaves EVERY ground term up to `verify_size` with an identical
+   normal form. This is sound w.r.t. those terms — no normal form changes,
+   so the kept set stays confluent and equivalent on them — and it removes
+   the AC "combination" rules (commutativity/associativity permutations)
+   that the generators already normalize.
+
+   Caveats: (1) it is verified, not a global theorem — for an infinite
+   domain a rule redundant up to `verify_size` could in principle matter
+   beyond it; (2) a rule whose LHS is too large to be exercised within the
+   universe (size >= verify_size) is kept, since removing it can't be
+   tested. Removal is iterative (one at a time, re-checking) so that two
+   mutually-redundant rules aren't both dropped.
+
+   This does NOT speed up enumeration (it runs afterwards and itself costs
+   the verification sweep); it shrinks the rule set for storage and for
+   faster application-time normalization. *)
+let minimize_rules ~sym_cmp ~all_symbols ~k ~verify_size rules =
+  let terms =
+    let acc = ref [] in
+    for sz = 1 to verify_size do
+      acc := ground_terms_of_size all_symbols ~k sz @ !acc
+    done; !acc
+  in
+  let nf_under rs = let index = Rewrite.index_rules rs in
+    fun t -> Rewrite.norm_bottom ~sym_cmp ~index t in
+  let target = let f = nf_under rules in List.map (fun t -> (t, f t)) terms in
+  let preserves kept =
+    let f = nf_under kept in
+    List.for_all (fun (t, nf0) -> Types.term_eq sym_cmp (f t) nf0) target
+  in
+  let rec loop kept =
+    let arr = Array.of_list kept in
+    let n = Array.length arr in
+    let rec scan i =
+      if i >= n then kept
+      else
+        let (l, _) = arr.(i) in
+        let without = List.filteri (fun j _ -> j <> i) kept in
+        if Types.size l < verify_size && preserves without
+        then loop without          (* rule i is redundant; drop and restart *)
+        else scan (i + 1)
+    in
+    scan 0
+  in
+  loop rules
