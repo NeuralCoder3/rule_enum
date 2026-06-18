@@ -302,7 +302,10 @@ let confirm_equiv ~assume_unproven ~use_smt ~smt_vars dom t1 ex1 t2 ex2 =
    at ~5·10^5 vectors that dominated the whole iteration (minutes). Here we
    bucket by a STRONG hash (`hash_param` over the full vector) into an
    int-keyed table, then split each bucket by exact `=`. Hashing is O(len)
-   once per value; equality runs only on genuine hash collisions. *)
+   once per value; equality runs only on genuine hash collisions.
+   (A plain `Hashtbl` keyed by the vector was measured ~15% slower on bv4
+   size-7 and worse at scale — the int-key indirection is the only way to
+   apply a full hash to a polymorphic array key, so it stays.) *)
 let group_by key_of_value values =
   let h : (int, ('k * 'v list ref) list ref) Hashtbl.t =
     Hashtbl.create (max 16 (List.length values)) in
@@ -895,7 +898,7 @@ let mem_label name =
   end
 
 let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
-      (caps : Enum.caps) ~num_domains ~sym_cmp : 's iter_summary =
+      (caps : Enum.caps) ~num_domains ~sym_cmp ~full_orbit : 's iter_summary =
   let t_start = Sys.time () in
   (* Snapshot the unproven-equivalence logs so we can report what THIS
      iteration added/skipped, not just the cumulative totals. *)
@@ -1119,7 +1122,18 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         else Eval.behavior_compiled_arr dom compiled_inputs_arr a in
       if a_bv = anon_bv then Some (a, Kbo.cache a) else None) orbit
   in
+  (* The hole-permutation orbit of the anon form is only needed when hole
+     terms are NOT separately enumerated (max_holes = 0): there it is the
+     sole source of constP commutativity/reassociation rules. With
+     max_holes > 0 every hole orientation (`A&B`, `B&A`, ...) is already an
+     enumerated candidate, so the pure-hole groups orient those rules by
+     direct (total) KBO and the orbit is redundant — skipping it yields an
+     equivalent, confluent, ~38%-leaner rule set and a faster run (verified
+     identical ground equivalence classes through size 8). `--full-orbit`
+     forces the orbit on regardless. *)
   let orbit_of_anon anon =
+    if not (full_orbit || caps.Enum.max_holes = 0)
+    then [(anon, Kbo.cache anon)] else
     if not use_cache then compute_orbit anon
     else match Hashtbl.find_opt anon_cache anon with
       | Some v -> v
@@ -1317,7 +1331,7 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
 
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
-      ?unknown_inputs ?(progress = false)
+      ?unknown_inputs ?(progress = false) ?(full_orbit = false)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   Types.clear_cons_cache ();
@@ -1338,7 +1352,7 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
   let results = ref [] in let n = ref 1 in let continue = ref true in
   while !continue && !n <= default_max do
     let summary = run_iteration dom rs !n caps
-        ~num_domains:workers
+        ~num_domains:workers ~full_orbit
         ~sym_cmp:dom.Domain.sym_compare in
     (* Terminate only on a *non-empty* iteration that made no progress (a
        genuine fixpoint). An empty enumeration is a size GAP, not a

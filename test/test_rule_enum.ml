@@ -1187,6 +1187,42 @@ let test_all_possible_terms_soundness_and_confluence () =
    terms reaching different normal forms). Each witness must now reduce to
    a strictly smaller, SMT-equivalent normal form and must NOT be listed
    as an irreducible. *)
+(* Default = skip the anon hole-orbit when max_holes>0 (it's redundant:
+   every hole orientation is already an enumerated candidate). This must
+   (a) produce a strictly leaner rule set than --full-orbit, and (b) stay
+   complete — every ground (hole-only) bool term up to size 7 must still
+   normalize to one form per truth-table class. --full-orbit must be
+   complete too. *)
+let test_orbit_skip_default () =
+  let bcmp = Domain_bool.compare_symbol in
+  let rules ~full_orbit =
+    Random.init 1;
+    let rs, _ = Algorithm.run ~max_size:7 Domain_bool.bool_domain ~num_domains:1
+      ~num_random_inputs:100 ~max_vcs:3 ~max_holes:3 ~use_smt:false ~full_orbit in
+    rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules
+  in
+  let lean = rules ~full_orbit:false and full = rules ~full_orbit:true in
+  assert (List.length lean < List.length full);          (* default is leaner *)
+  let tt t = List.concat_map (fun a -> List.concat_map (fun b -> List.map (fun c ->
+    Eval.eval Domain_bool.bool_domain [("A",a);("B",b);("C",c)] t) [false;true]) [false;true]) [false;true] in
+  let terms =
+    let acc = ref [] in
+    for sz = 1 to 7 do acc := all_possible_terms_of_size Domain_bool.all_symbols ~k:3 sz @ !acc done; !acc in
+  let confluent rs =
+    let idx = Rewrite.index_rules rs in
+    let nf t = Types.canonicalize (Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx t) in
+    let groups = Hashtbl.create 256 in
+    List.iter (fun t -> let k = tt t in
+      Hashtbl.replace groups k (nf t :: (try Hashtbl.find groups k with Not_found -> []))) terms;
+    Hashtbl.fold (fun _ nfs ok ->
+      ok && (match List.sort_uniq (Types.term_compare bcmp) nfs with _::_::_ -> false | _ -> true))
+      groups true
+  in
+  assert (confluent lean);                                (* default complete (size 7) *)
+  assert (confluent full);
+  Printf.printf "  orbit-skip default: OK (lean %d rules < full-orbit %d, both confluent on bool size<=7)\n"
+    (List.length lean) (List.length full)
+
 let test_dead_hole_reduction () =
   Random.init 42;
   let k = 3 in
@@ -1356,6 +1392,7 @@ let () = Printf.printf "Running tests...\n";
   test_save_load_normalize ();
   test_full_soundness_and_completeness ();
   test_all_possible_terms_soundness_and_confluence ();
+  test_orbit_skip_default ();
   test_dead_hole_reduction ();
   test_minimize_rules ();
   test_tier2_accumulates_and_short_circuits ();

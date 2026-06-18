@@ -77,7 +77,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
       ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info ~progress
-      ~minimize ~minimize_size =
+      ~minimize ~minimize_size ~full_orbit =
   let to_str = dom.Rule_enum.Domain.term_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
@@ -104,7 +104,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
         (List.map (fun (t, _, _) -> t) rs.Rule_enum.Algorithm.behaviors)
   in
   let rs, _iters =
-    Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand
+    Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand ~full_orbit
       ~max_vcs ~max_vars ~max_holes ~num_domains:effective_jobs
       ~forced_inputs:forced ~use_smt ~use_smt_forced ~assume_unproven
       ?unknown_inputs ~progress
@@ -255,6 +255,7 @@ let () =
   let safe_mode = ref false in
   let info = ref (try Sys.getenv "RULE_ENUM_INFO" = "1" with Not_found -> false) in
   let progress = ref false in
+  let full_orbit = ref false in
   let minimize = ref false in
   let minimize_size = ref 0 in
   (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
@@ -281,6 +282,7 @@ let () =
     ("--safe-mode", Arg.Set safe_mode, " Do not assume unproven equivalences: when SMT returns Unknown and random can't refute, keep terms distinct (no rule)");
     ("--info", Arg.Set info, " Print detailed per-iteration counts (reducible/skipped terms, decision breakdown, SMT/tier activity). Also via RULE_ENUM_INFO=1");
     ("--progress", Arg.Set progress, " Show a progress bar (on a TTY) during each iteration, by enumerated terms processed");
+    ("--full-orbit", Arg.Set full_orbit, " Emit the full hole-permutation orbit of rules during grouping. Default skips it when --max-holes>0 (the orbit is then redundant: every hole orientation is already enumerated), giving a leaner, faster, equivalent rule set. Forces it on (e.g. for the var-only --max-holes 0 mode, where it stays on automatically).");
     ("--minimize-rules", Arg.Set minimize, " Post-pass: drop rules that are redundant (verified to preserve every normal form on ground terms up to the verify size). Shrinks --rule-output; does not speed up synthesis.");
     ("--minimize-size", Arg.Set_int minimize_size, " N  Ground-term size bound for --minimize-rules verification (default: max-size + 2)");
     ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
@@ -330,7 +332,7 @@ let () =
         ~rule_output:!rule_output ~irred_output:!irred_output
         ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
         ~assume_unproven:(not !safe_mode) ~unknown_inputs ~info:!info
-        ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size
+        ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size ~full_orbit:!full_orbit
   in
   match !domain_name with
   | "int"  -> dispatch Rule_enum.Domain_int.int_domain [] "int"
