@@ -139,6 +139,27 @@ As a sanity check we also normalized Ruler's own rule terms with our rules
 (`eval/ruler/ruler_bool_3_2_0_norm_vcs3.txt`): every Ruler equality collapses to
 a single normal form, i.e. **our rules prove all of Ruler's equalities**.
 
+### Synthesis cost
+
+How long does it take to *produce* these rule sets? Our times are the cumulative
+synthesis wall-clock (from the run logs, 4 workers); Ruler's are re-measured on
+the same machine (`./target/debug/bool synth --variables 3 --iters {2,4}`).
+Recall `it2 ≈ size 5`, `it4 ≈ size 9`.
+
+| rule set | rules | synth time |
+|----------|------:|-----------:|
+| ours, holes-only, size ≤ 5 (`bool_v0c3_s5`) | 154 | < 0.05 s |
+| ours, holes-only, size ≤ 9 (`bool_v0c3_s9`) | 9 535 | 0.5 s |
+| ours, vars+holes, size ≤ 5 (`bool_vcs3_s5`) | 227 | < 0.05 s |
+| ours, vars+holes, size ≤ 9 (`bool_vcs3_s9`) | 4 213 | 1.1 s |
+| ours, vars+holes, **full / complete** (`bool_vcs3`) | 117 265 | 9 985 s (≈ 2.8 h) |
+| Ruler `it2` (≈ size 5) | 18 | 0.29 s |
+| Ruler `it4` (≈ size 9) | 33 | 128 s |
+
+**(1) Reaching a given rule size is cheap for us.** Our size-9
+variable set (4 213 rules) is synthesized in **1.1 s**, ~100× faster than Ruler's
+**128 s** for its size-9 set — exhaustive size-stratified enumeration up to size 9
+is far cheaper than 4 iterations of equality saturation. 
 ---
 
 ## Simplification of random terms
@@ -256,25 +277,87 @@ blows up (the run did not saturate).
 and weaker than the shared-e-graph `parallel` mode and is kept only for
 reference.)*
 
-### Headline: our greedy vs. Ruler's e-graph, at size 9
+### Engines compared: greedy vs. e-graph (parallel / sequential)
+
+We benchmarked the three normalizers on 50 random terms of growing size (memory-
+safe node caps: parallel 100 k, sequential 50 k). E-graph cost is
+`O(#terms × 6^iters)` in nodes (AC rules grow the graph ~6×/iteration) and
+extraction scales with graph size; greedy memory is `O(term size)`.
+
+![engines: quality and memory vs term size](eval/terms/bench/fig_methods.png)
+
+*Figure RQ4f. Mean normal-form size (left) and peak memory (right, log)
+vs. input term size. × = no result (OOM / extraction timeout).*
+
+| input size | greedy | parallel (100 k) | sequential (50 k) |
+|-----------:|-------:|-----------------:|------------------:|
+| 50   | 5 | 6   | 9   |
+| 250  | 5 | 19  | 21  |
+| 500  | 4 | 154 | 28  |
+| 1000 | 4 | 206 | 63  |
+| 2000 | 5 | ✗   | 46  |
+| 3000 | 5 | ✗   | 262 |
+
+*(mean normal-form size; greedy is flat ~4–5 at every size, both e-graph modes
+degrade with size, parallel stops returning past ~1000.)*
+
+**Greedy is also ~2 orders of magnitude faster:**
+
+![speed at size 1000](eval/terms/bench/fig_speed.png)
+
+*Figure RQ4g. Wall-clock to normalize 50 size-1000 terms: greedy 0.6 s vs.
+parallel 79 s (135×) and sequential 44 s (75×).*
+
+- **Greedy**: flat quality (~4–5), **<1 s**, ~0.15 GB at every size — cost is
+  independent of term count and iterations.
+- **Parallel e-graph**: quality collapses past size ~500 (node cap bites earlier
+  for bigger terms) and it **stops returning past ~1000** (global extraction from
+  the ~1 M-node graph never finishes; a higher cap OOMs — space, never time).
+- **Sequential e-graph**: per-term extraction is cheap so it is the *only* mode
+  that still returns at size 3000, but quality is poor and variable and it is
+  ~75× slower than greedy. Its memory *decreases* with term size (right panel,
+  red): the node cap is checked between iterations, so peak memory is set by the
+  iteration that overshoots it. A *small* term reaches the cap only after many
+  iterations and crosses it with a large multiplicative jump (big overshoot — a
+  single size-50 term peaks at 0.57 GB); a *large* term already starts near the
+  cap and crosses it in 1–2 iterations with little overshoot (size-3000: 0.14 GB).
+
+Net on large terms: **greedy ≫ sequential e-graph ≫ parallel e-graph**.
+Full matrix and trajectories: `eval/terms/bench/FINDINGS.md`.
+
+### Headline: our greedy vs. Ruler's e-graph
 
 The fairest single picture pits each tool's *intended* normalizer against the
-other's at the same rule size: Ruler's rules under **equality saturation** (its
-designed setting) vs. our (variable) rules under **plain greedy** normalization
-(ours).
+other's: Ruler's rules under **equality saturation** (its designed setting) vs.
+our (variable) rules under **plain greedy** normalization (ours), at the matched
+size 9 and with our full complete set.
 
-![Ruler e-graph vs ours greedy, size 9](eval/terms/fig_final.png)
+![Ruler e-graph vs ours greedy](eval/terms/fig_final.png)
 
-*Figure RQ4e. 1000 size-50 random terms, size-9 rules. Ruler `it4` in a full
-e-graph reaches median 4 (max 29); our `vcs3_s9` rules under a single greedy /
-discrimination-tree pass reach median 6 (max 35).*
+*Figure RQ4e. 1000 size-50 random terms. Ruler `it4` in a full e-graph reaches
+median 4 (max 29); our variable `s9` rules under a single greedy /
+discrimination-tree pass reach median 6 (max 35); our **full** rules under the
+same greedy pass reach **median 4, max 10**.*
 
-**Our cheap greedy pass is competitive with Ruler's full equality-saturation
-machinery.** The two distributions nearly coincide (medians 6 vs. 4) — we get
-within ~2 nodes of the e-graph result without building an e-graph at all, using
-only oriented, terminating rewriting. (For reference, the *holes-only* greedy
-rules at size 9 reach only median 23 — the variable rules are what make greedy
-competitive here, cf. Fig. RQ4b.)
+Two takeaways. **(1) Even our cheap, size-9 greedy pass is competitive with
+Ruler's full equality-saturation machinery** — medians 6 vs. 4, within ~2 nodes,
+without building an e-graph at all. **(2) Our *complete* set under plain greedy
+*matches* Ruler's e-graph on the median (4 vs. 4) and is strictly better in the
+worst case (max 10 vs. 29):** because every greedy normal form is an irreducible,
+our complete set cannot leave anything above size 10 (the largest irreducible),
+whereas the bounded e-graph still has a tail out to 29. (For reference, *holes-only*
+greedy at size 9 reaches only median 23 — the variable rules are what make greedy
+competitive at a size cap, cf. Fig. RQ4b.)
+
+The same comparison on **size-1000** inputs sharpens the picture:
+
+![size-1000 normal-form distribution](eval/terms/bench/fig_final_1000.png)
+
+*Figure RQ4e(b). 50 size-1000 random terms. Greedy with the full set reduces
+*every* term to ≤ 9 (median 4); Ruler `it4` in an e-graph has the same median but
+a heavy tail (20 % of terms stay > 10, up to 146); greedy with the size-9 set is
+weakest (median 25). On large terms greedy-full is both the most reliable and the
+only one with a hard size bound.*
 
 ---
 
@@ -292,7 +375,10 @@ competitive here, cf. Fig. RQ4b.)
    `eval/terms/fig_eqsat.{png,tex}` side by side (RQ4c/d): Ruler vs. ours under
    greedy vs. e-graph — the method-vs-rule-style story.
 8. **Fig. 6 (headline)** — `eval/terms/fig_final.{png,tex}` (RQ4e): our plain
-   greedy vs. Ruler's e-graph at size 9 — ours is competitive without an e-graph.
+   greedy (size 9 and full) vs. Ruler's e-graph — our complete set matches the
+   e-graph median and beats its worst case, no e-graph needed.
+9. **Table 3** — synthesis cost (§3): our size-5/9 holes/vars and full runs vs.
+   Ruler `it2`/`it4` generation time.
 
 ---
 
