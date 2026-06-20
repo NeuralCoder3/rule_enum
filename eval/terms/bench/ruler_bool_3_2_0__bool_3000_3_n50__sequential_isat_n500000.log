@@ -1,0 +1,4 @@
+note: skipped 3 rule direction(s) with unbound target variables
+loaded 25 rewrite(s) from eval/ruler/ruler_bool_3_2_0.json
+read 50 term(s) from eval/terms/bool_3000_3_n50.txt
+running sequential eqsat (saturation, capped at 600.0s / 500000 nodes)...

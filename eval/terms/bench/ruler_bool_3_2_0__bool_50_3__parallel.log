@@ -1,0 +1,34 @@
+note: skipped 3 rule direction(s) with unbound target variables
+loaded 25 rewrite(s) from eval/ruler/ruler_bool_3_2_0.json
+read 100 term(s) from eval/terms/bool_50_3.txt
+running parallel eqsat (saturation, capped at 120.0s / 2000000 nodes)...
+  [parallel] iter=0 nodes=1987 t=0.0s
+  [parallel] iter=1 nodes=4780 t=0.0s
+  [parallel] iter=2 nodes=15772 t=0.0s
+  [parallel] iter=3 nodes=90598 t=0.3s
+  [parallel] iter=4 nodes=765850 t=12.5s
+memory allocation of 3072 bytes failed
+Command terminated by signal 6
+	Command being timed: "scripts/egglog/venv/bin/python scripts/egglog/simplify.py eval/ruler/ruler_bool_3_2_0.json eval/terms/bool_50_3.txt eval/terms/bench/ruler_bool_3_2_0__bool_50_3__parallel.txt --mode parallel --in-notation prefix --out-notation infix --bench --saturate --node-limit 2000000 --time-limit 120 --limit 100"
+	User time (seconds): 39.05
+	System time (seconds): 7.55
+	Percent of CPU this job got: 56%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:23.07
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 7775396
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 2237955
+	Voluntary context switches: 9890
+	Involuntary context switches: 13300
+	Swaps: 0
+	File system inputs: 8
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

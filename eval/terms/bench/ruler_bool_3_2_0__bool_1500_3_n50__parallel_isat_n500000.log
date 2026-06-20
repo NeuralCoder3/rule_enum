@@ -1,0 +1,9 @@
+note: skipped 3 rule direction(s) with unbound target variables
+loaded 25 rewrite(s) from eval/ruler/ruler_bool_3_2_0.json
+read 50 term(s) from eval/terms/bool_1500_3_n50.txt
+running parallel eqsat (saturation, capped at 150.0s / 500000 nodes)...
+  [parallel] iter=0 nodes=27548 t=0.0s
+  [parallel] iter=1 nodes=56473 t=0.1s
+  [parallel] iter=2 nodes=464573 t=1.2s
+  [parallel] iter=3 nodes=1174823 t=71.9s
+  [parallel] STOP reason=node iters=3 nodes=1174823 t=71.9s
