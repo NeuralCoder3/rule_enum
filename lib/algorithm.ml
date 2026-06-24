@@ -1157,33 +1157,6 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       List.map (fun (a, a_c) -> (t, bv, ex, a, a_c)) (orbit_of_anon anon))
       term_triples
     in
-    (* Pick the minimum under anon-form KBO; ties broken by compare_total
-       on the SOURCE terms (var-form sorts smaller than hole-form, so we
-       prefer var-canonical winners over hole-canonical when they
-       represent the same anon-form). *)
-    let winner = match with_anon with
-      | [] -> failwith "empty group"
-      | first :: rest ->
-        List.fold_left (fun acc cur ->
-          let (acc_t, _, _, _, acc_c) = acc in
-          let (cur_t, _, _, _, cur_c) = cur in
-          match Kbo.kbo_cached sym_cmp cur_c acc_c with
-          | Kbo.Less -> cur
-          | Kbo.Greater -> acc
-          | Kbo.Equal | Kbo.Incomparable ->
-            if Kbo.compare_total sym_cmp cur_t acc_t < 0 then cur else acc)
-          first rest
-    in
-    let (w_t, w_bv, w_ex, w_anon, _) = winner in
-    let w_c = Kbo.cache w_t in   (* constant per group — hoisted out of the inner loop below *)
-    new_irreducibles := w_t :: !new_irreducibles;
-    new_irr_pairs := (w_t, w_bv, w_ex) :: !new_irr_pairs;
-    (* For each non-winner: emit a rule.
-       - If var-KBO orders other → winner, emit var rule.
-       - Else emit anon-form rule (other_anon → winner_anon). The anon
-         form uses Holes; thanks to match_var_const accepting Var as a
-         size-0 image, the rule still fires on var-containing targets
-         at normalize time. *)
     (* Distinct Var ids (is_hole=false) or Hole ids (is_hole=true) in `t`. *)
     let collect_ids ~is_hole t =
       let s = Hashtbl.create 4 in
@@ -1201,40 +1174,68 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       let lhs_ids = collect_ids ~is_hole lhs in
       List.for_all (fun k -> List.mem k lhs_ids) (collect_ids ~is_hole rhs)
     in
-    let holes_subset_le rhs lhs = ids_subset ~is_hole:true rhs lhs in
-    let var_set_le rhs lhs = ids_subset ~is_hole:false rhs lhs in
-    List.iter (fun (other_t, _, other_ex, other_anon, _) ->
-      (* Skip only the winner's own (source, anon) entry. Orbit expansion
-         produces multiple entries with the same source `t` but different
-         anon forms — those non-winning anons need rules emitted (this is
-         how commutativity rules surface). *)
-      let same_as_winner =
-        Types.term_eq sym_cmp other_t w_t
-        && Types.term_eq sym_cmp other_anon w_anon
+    let regular lhs rhs = ids_subset ~is_hole:false rhs lhs && ids_subset ~is_hole:true rhs lhs in
+    (* IRREDUCIBLES = the KBO-minimal ANTICHAIN of the group's distinct source
+       terms. A source is reduced to the compare_total-least strictly-KBO-
+       smaller, regular source if one exists (a KBO-oriented rule that is
+       substitution-stable, so rewriting terminates with no application
+       guard); otherwise it is irreducible. Equivalent terms KBO cannot
+       order (e.g. `A&a` vs `a&A`, `a+(a*b)` vs `a+(b*a)`) are therefore ALL
+       kept as irreducibles — no fixed orientation between them agrees with
+       KBO. This works on SOURCE terms, not the anon/orbit forms, so the
+       result is independent of `--full-orbit`. *)
+    let sources =
+      let seen = Hashtbl.create 8 in
+      List.filter_map (fun (t, bv, ex, _, _) ->
+        if Hashtbl.mem seen t then None
+        else (Hashtbl.add seen t (); Some (t, bv, ex, Kbo.cache t)))
+        with_anon
+    in
+    List.iter (fun (t, bv, ex, tc) ->
+      let target = List.fold_left (fun best (t2, _, _, t2c) ->
+        if Types.term_eq sym_cmp t t2 then best
+        else if Kbo.kbo_cached sym_cmp tc t2c = Kbo.Greater && regular t t2 then
+          (match best with
+           | Some b when Kbo.compare_total sym_cmp b t2 <= 0 -> best
+           | _ -> Some t2)
+        else best)
+        None sources
       in
-      if not same_as_winner then begin
-        let other_c = Kbo.cache other_t in
-        let rule =
-          match Kbo.kbo_cached sym_cmp w_c other_c with
-          | Kbo.Less when var_set_le w_t other_t && holes_subset_le w_t other_t ->
-            Some (other_t, w_t)
-          | _ ->
-            if Types.term_eq sym_cmp other_anon w_anon then None
-            else if holes_subset_le w_anon other_anon
-                 && var_set_le w_anon other_anon
-            then Some (other_anon, w_anon)
-            else None
-        in
-        (* Confirm the ACTUAL rule pair (lhs, rhs), not the source terms.
-           Orbit members share a source (`other_t = w_t`), so checking the
-           sources is a trivially-true self-comparison; the emitted rule
-           may relate different hole orientations (e.g. the bogus
-           Shl(B,A) -> Shl(A,B), whose sides agree only on a degenerate
-           all-zero random sample). Verifying lhs ≡ rhs directly lets SMT
-           reject such non-equivalences. *)
-        let _ = other_ex in let _ = w_ex in
-        (match rule with Some r -> candidate_rules := r :: !candidate_rules | None -> ())
-      end) with_anon)
+      match target with
+      | Some t' -> candidate_rules := (t, t') :: !candidate_rules
+      | None ->
+        new_irreducibles := t :: !new_irreducibles;
+        new_irr_pairs := (t, bv, ex) :: !new_irr_pairs)
+      sources;
+    (* When hole orientations are NOT separately enumerated as sources (orbit
+       active: var-only mode or --full-orbit), constP commutativity surfaces
+       only via the hole-permutation orbit. Emit the KBO-oriented anon rule
+       (other_anon → winner_anon). These are all-hole, hence KBO-ordered by
+       id, and same-size, so (see match_var_const) they never fire on a var
+       target. In the default (orbit-off) mode the source rules above already
+       orient every hole pair, so this is skipped. *)
+    if full_orbit || caps.Enum.max_holes = 0 then begin
+      let winner = match with_anon with
+        | [] -> failwith "empty group"
+        | first :: rest ->
+          List.fold_left (fun acc cur ->
+            let (_, _, _, _, acc_c) = acc in
+            let (_, _, _, _, cur_c) = cur in
+            match Kbo.kbo_cached sym_cmp cur_c acc_c with
+            | Kbo.Less -> cur | Kbo.Greater -> acc
+            | Kbo.Equal | Kbo.Incomparable ->
+              let (acc_t,_,_,_,_) = acc and (cur_t,_,_,_,_) = cur in
+              if Kbo.compare_total sym_cmp cur_t acc_t < 0 then cur else acc)
+            first rest
+      in
+      let (_, _, _, w_anon, w_anon_c) = winner in
+      List.iter (fun (_, _, _, oa, oac) ->
+        if (not (Types.term_eq sym_cmp oa w_anon))
+           && Kbo.kbo_cached sym_cmp oac w_anon_c = Kbo.Greater
+           && regular oa w_anon
+        then candidate_rules := (oa, w_anon) :: !candidate_rules)
+        with_anon
+    end)
     groups;
   prof_label (Printf.sprintf "kbo-extract orbit (%d groups)" (List.length groups))
     (Sys.time () -. t_kbo_extract);
@@ -1282,6 +1283,22 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
     (Sys.time () -. t_confirm);
   Progress.finish ();
   let sorted = List.sort (fun (a,_,_) (b,_,_) -> Kbo.compare_total sym_cmp a b) !new_irr_pairs in
+  (* Keep only genuine normal forms. A group winner is filtered against the
+     rules known BEFORE this iteration; a rule emitted DURING it (for another
+     group, or this group's own size-reduction) can make that winner
+     reducible after the fact — its behavior class is then already
+     represented by the smaller term it rewrites to (an existing
+     irreducible), so the winner was never a new class. Dropping it keeps
+     `behaviors` self-consistent (every listed irreducible is a true normal
+     form) and the enumeration basis it seeds clean. The size-non-increasing,
+     KBO-oriented rules guarantee the normal form is a strictly smaller (thus
+     earlier-recorded) irreducible, so no class is lost. *)
+  let nf_index = Rewrite.index_rules (all_rules rs) in
+  let sorted =
+    List.filter (fun (t, _, _) ->
+      Types.term_eq sym_cmp (Rewrite.norm_bottom ~sym_cmp ~index:nf_index t) t)
+      sorted
+  in
   List.iter (fun entry ->
     rs.behaviors <- entry :: rs.behaviors;
     (* Keep the persistent bv-index in lock-step with behaviors. If it was

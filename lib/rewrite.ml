@@ -96,7 +96,11 @@ let walk_dt ~confirm_rewrite root target =
 
 let try_rewrite sym_cmp idx target =
   let confirm_hole (lhs, rhs) tgt =
-    match Types.match_var_const sym_cmp lhs tgt with
+    (* A same-size (commutativity) hole rule must not bind a target var:
+       that would be a non-KBO reorientation. Only strictly size-reducing
+       hole rules may image a hole onto a var (always KBO-decreasing). *)
+    let allow_var_image = Types.size lhs > Types.size rhs in
+    match Types.match_var_const ~allow_var_image sym_cmp lhs tgt with
     | Some (vmap, hmap) -> Some (Types.apply_var_const vmap hmap rhs)
     | None -> None
   in

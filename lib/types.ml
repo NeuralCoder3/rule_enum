@@ -334,7 +334,18 @@ let apply_subst mapping t =
    (canonical orientation), and LHS `Hole 1 + Hole 0` fires on targets
    with left arg > right arg (non-canonical) — exactly the asymmetry
    needed to support commutativity rules. *)
-let match_var_const sym_cmp pattern target =
+(* `allow_var_image`: may a pattern Hole bind a target Var (a "size-0
+   image")? Required for strictly size-reducing rules to fire on
+   var-containing terms (e.g. idempotence `A&A -> A` rewriting `a&a -> a`,
+   a KBO-decreasing step). It MUST be OFF for same-size rules: a same-size
+   hole rule is a commutativity/reorientation rule, oriented on its all-hole
+   schema by hole id; binding a var would reorder via `term_compare`'s
+   Var<Hole convention, which is NOT substitution-stable (KBO ranks Var vs
+   Hole Incomparable). Such a step — e.g. `A&a -> a&A` from `B&A -> A&B` —
+   does not agree with KBO, so it must not fire; `A&a` and `a&A` are then
+   both irreducible, as they should be. Ground (var-free) targets are
+   unaffected either way (no var to bind). *)
+let match_var_const ?(allow_var_image = true) sym_cmp pattern target =
   let vmap = ref [] in
   let hmap = ref [] in
   let order_ok_for_new ph img =
@@ -351,7 +362,7 @@ let match_var_const sym_cmp pattern target =
        | None -> vmap := (pv, t) :: !vmap; true)
     | Hole ph, target ->
       let is_size0 = match target with
-        | Var _ -> true
+        | Var _ -> allow_var_image
         | Hole _ -> true
         | Node (_, []) -> true
         | _ -> false
