@@ -1331,7 +1331,7 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
 
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
-      ?unknown_inputs ?(progress = false) ?(full_orbit = false)
+      ?unknown_inputs ?(progress = false) ?(full_orbit = false) ?(converge_window = 1)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   Types.clear_cons_cache ();
@@ -1350,20 +1350,41 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
     failwith "Algorithm.run: no inputs and SMT disabled";
   let rs = create ~use_smt ~use_smt_forced ~assume_unproven inputs in
   let results = ref [] in let n = ref 1 in let continue = ref true in
+  let quiet = ref 0 in
   while !continue && !n <= default_max do
     let summary = run_iteration dom rs !n caps
         ~num_domains:workers ~full_orbit
         ~sym_cmp:dom.Domain.sym_compare in
-    (* Terminate only on a *non-empty* iteration that made no progress (a
-       genuine fixpoint). An empty enumeration is a size GAP, not a
-       fixpoint: a domain whose smallest operator has arity k > 1 (and no
-       unary op) produces nothing at some sizes — e.g. with only a binary
-       `+` and a 0-ary `0`, size 2 is empty while size 3 has `a+b`. Quitting
-       on the gap would never reach the operator terms. *)
+    (* Always report the iteration we just computed — INCLUDING the one that
+       detects convergence — so the log/CSV's last row is the size that
+       actually ran (and shows the +0/+0/+0 that ended it), not the size
+       before it. *)
+    on_iteration rs summary; results := summary :: !results;
+    (* A *non-empty* iteration that adds no rule is a CANDIDATE fixpoint. An
+       empty enumeration is only a size GAP, not a fixpoint: a domain whose
+       smallest operator has arity k > 1 (and no unary op) produces nothing
+       at some sizes — e.g. with only a binary `+` and a 0-ary `0`, size 2
+       is empty while size 3 has `a+b`; quitting on the gap would never
+       reach the operator terms.
+
+       But a *single* quiet size is not a true fixpoint either: new
+       size-reducing rules can re-appear at a much larger size. E.g. for two
+       irreducibles i, j the term op(i, j) is first enumerated at size
+       |i|+|j|+1, and if its behavior collides with a smaller term and no
+       pattern rule already reduces it, that is a brand-new size-reducing
+       rule — so a quiet size 21 says nothing about size 37. We therefore
+       require `converge_window` CONSECUTIVE quiet sizes before declaring
+       convergence. `converge_window <= 0` disables early stopping entirely
+       (enumerate all the way to --max-size). Caveat: NO finite window is
+       sound in general — a quiet stretch wider than the window still stops
+       early; only running to --max-size is guaranteed complete up to it. *)
     if summary.enumerated > 0
-       && summary.new_size_rules = [] && summary.new_kbo_rules = [] && summary.new_irreducibles = [] then
-      continue := false
-    else (on_iteration rs summary; results := summary :: !results; incr n)
+       && summary.new_size_rules = [] && summary.new_kbo_rules = []
+       && summary.new_irreducibles = [] then begin
+      incr quiet;
+      if converge_window > 0 && !quiet >= converge_window then continue := false
+    end else quiet := 0;
+    incr n
   done; (rs, List.rev !results)
 
 (* Expose resolution for callers that need to print the actual job count. *)
