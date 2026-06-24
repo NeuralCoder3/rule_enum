@@ -898,7 +898,7 @@ let mem_label name =
   end
 
 let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
-      (caps : Enum.caps) ~num_domains ~sym_cmp ~full_orbit : 's iter_summary =
+      (caps : Enum.caps) ~num_domains ~sym_cmp ~full_orbit ~one_per_class : 's iter_summary =
   let t_start = Sys.time () in
   (* Snapshot the unproven-equivalence logs so we can report what THIS
      iteration added/skipped, not just the cumulative totals. *)
@@ -1191,6 +1191,7 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
         else (Hashtbl.add seen t (); Some (t, bv, ex, Kbo.cache t)))
         with_anon
     in
+    let irreducible_here = ref [] in
     List.iter (fun (t, bv, ex, tc) ->
       let target = List.fold_left (fun best (t2, _, _, t2c) ->
         if Types.term_eq sym_cmp t t2 then best
@@ -1203,10 +1204,30 @@ let run_iteration (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets) (n : int)
       in
       match target with
       | Some t' -> candidate_rules := (t, t') :: !candidate_rules
-      | None ->
-        new_irreducibles := t :: !new_irreducibles;
-        new_irr_pairs := (t, bv, ex) :: !new_irr_pairs)
+      | None -> irreducible_here := (t, bv, ex) :: !irreducible_here)
       sources;
+    (* By default keep the full KBO-minimal antichain — every irreducible
+       representative of the class. With `one_per_class`, keep only ONE (the
+       compare_total-least, a deterministic orbit-independent choice). That
+       yields far fewer irreducibles, so much less enumeration and far fewer
+       SMT confirmations downstream — but it is NOT complete: a rule that would
+       only surface by enumerating from a dropped, KBO-incomparable
+       representative is missed (two equivalent terms can carry different
+       variables and be KBO-incomparable even in every context). *)
+    let to_record =
+      if one_per_class then
+        match !irreducible_here with
+        | [] -> []
+        | first :: rest ->
+          [ List.fold_left (fun (bt, _, _ as best) (ct, _, _ as cur) ->
+              if Kbo.compare_total sym_cmp ct bt < 0 then cur else best)
+              first rest ]
+      else !irreducible_here
+    in
+    List.iter (fun (t, bv, ex) ->
+      new_irreducibles := t :: !new_irreducibles;
+      new_irr_pairs := (t, bv, ex) :: !new_irr_pairs)
+      to_record;
     (* When hole orientations are NOT separately enumerated as sources (orbit
        active: var-only mode or --full-orbit), constP commutativity surfaces
        only via the hole-permutation orbit. Emit the KBO-oriented anon rule
@@ -1349,6 +1370,7 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
       ?unknown_inputs ?(progress = false) ?(full_orbit = false) ?(converge_window = 1)
+      ?(one_per_class = false)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   Types.clear_cons_cache ();
@@ -1370,7 +1392,7 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
   let quiet = ref 0 in
   while !continue && !n <= default_max do
     let summary = run_iteration dom rs !n caps
-        ~num_domains:workers ~full_orbit
+        ~num_domains:workers ~full_orbit ~one_per_class
         ~sym_cmp:dom.Domain.sym_compare in
     (* Always report the iteration we just computed — INCLUDING the one that
        detects convergence — so the log/CSV's last row is the size that
