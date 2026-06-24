@@ -222,8 +222,15 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
       if output_file = "" then stdout
       else open_out output_file
     in
+    (* A term to simplify is GROUND: every leaf is a fixed
+       placeholder/constant, not a schema variable. Reinterpret each `Var`
+       as a `Hole` (constP) so the complete rule set's hole patterns and
+       commutativity canonicalization fire on them. (Leaving them as `Var`
+       lets the KBO matcher refuse to bind same-size commutativity rules to
+       a variable — correct for synthesis schemas, but it would stall
+       simplification of a concrete term.) *)
     List.iter (fun t ->
-      let n = normalize t in
+      let n = normalize (RE.Types.vars_to_holes t) in
       Printf.fprintf out "%s\n" (dom.RE.Domain.term_to_string n)) terms;
     if output_file <> "" then close_out out;
     Printf.printf "Normalized %d terms%s\n%!" (List.length terms)

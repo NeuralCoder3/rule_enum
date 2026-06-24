@@ -387,8 +387,20 @@ let test_no_equivalent_irreducibles () =
     let bv = Eval.behavior_compiled_arr int_dom compiled t in
     let prev = try Hashtbl.find by_bv bv with Not_found -> [] in
     Hashtbl.replace by_bv bv (t :: prev)) irrs;
+  (* A behavior bucket with >1 irreducible is a missing-orientation bug ONLY
+     if two of its members are KBO-COMPARABLE — then the KBO-larger one should
+     have been oriented to the smaller. Members that are mutually
+     KBO-Incomparable (e.g. `A&a` vs `a&A`, or `a+(a*b)` vs `a+(b*a)`) cannot
+     be oriented by any substitution-stable order, so they are legitimately
+     all irreducible. *)
   let collisions = Hashtbl.fold (fun _ ts acc ->
-    if List.length ts > 1 then ts :: acc else acc) by_bv [] in
+    let comparable_pair =
+      List.exists (fun a -> List.exists (fun b ->
+        not (Types.term_eq sym_cmp a b)
+        && (match Kbo.kbo sym_cmp a b with Kbo.Less | Kbo.Greater -> true | _ -> false))
+        ts) ts
+    in
+    if comparable_pair then ts :: acc else acc) by_bv [] in
   if collisions <> [] then begin
     Printf.eprintf "  equivalent irreducibles (missing orientation rule):\n";
     List.iter (fun ts ->
@@ -1364,6 +1376,97 @@ let test_all_bool_inputs () =
   Printf.printf "  all_bool_inputs: OK (%d irreducibles)\n"
     (List.length rs.Algorithm.behaviors)
 
+(* === var/hole-mixed commutativity: KBO-orientation & orbit-independence ===
+   `A&a` (var a, hole A) and `a&A` are equivalent but KBO-Incomparable, so no
+   substitution-stable rule can orient them — both must be irreducibles, and
+   the result must not depend on the hole-permutation orbit. *)
+let bool_synth_full ~full_orbit =
+  Algorithm.run ~max_size:7 bool_dom ~num_domains:1
+    ~forced_inputs:(Domain_bool.all_inputs 3) ~num_random_inputs:0
+    ~max_vcs:3 ~max_holes:3 ~use_smt:false ~full_orbit
+let bstr = Types.to_string Domain_bool.string_of_symbol
+
+(* (I1) Every rule is KBO-oriented (LHS > RHS): rewriting then terminates
+   without any per-application order check. *)
+let test_rules_kbo_oriented () =
+  let bcmp = Domain_bool.compare_symbol in
+  List.iter (fun full_orbit ->
+    let rs, _ = bool_synth_full ~full_orbit in
+    let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+    let bad = List.filter (fun (l, r) -> Kbo.kbo bcmp l r <> Kbo.Greater) rules in
+    if bad <> [] then begin
+      Printf.eprintf "  non-KBO-oriented rules (orbit=%b): %d/%d\n"
+        full_orbit (List.length bad) (List.length rules);
+      List.iter (fun (l, r) -> Printf.eprintf "    %s -> %s\n" (bstr l) (bstr r))
+        (List.filteri (fun i _ -> i < 12) bad);
+      assert false
+    end) [false; true];
+  Printf.printf "  rules KBO-oriented: OK\n"
+
+(* (I2) Every recorded irreducible is a genuine normal form: the full rule
+   set leaves it unchanged. *)
+let test_irreducibles_self_consistent () =
+  let bcmp = Domain_bool.compare_symbol in
+  List.iter (fun full_orbit ->
+    let rs, _ = bool_synth_full ~full_orbit in
+    let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+    let idx = Rewrite.index_rules rules in
+    let irrs = List.map (fun (t, _, _) -> t) rs.Algorithm.behaviors in
+    let bad = List.filter (fun t ->
+      not (Types.term_eq bcmp (Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx t) t)) irrs in
+    if bad <> [] then begin
+      Printf.eprintf "  reducible 'irreducibles' (orbit=%b): %d/%d\n"
+        full_orbit (List.length bad) (List.length irrs);
+      List.iter (fun t -> Printf.eprintf "    %s -> %s\n" (bstr t)
+        (bstr (Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx t)))
+        (List.filteri (fun i _ -> i < 12) bad);
+      assert false
+    end) [false; true];
+  Printf.printf "  irreducibles self-consistent: OK\n"
+
+(* (I4) The converged irreducible set must not depend on the orbit when holes
+   are enumerated (max_holes>0). *)
+let test_orbit_independent_irreducibles () =
+  let bcmp = Domain_bool.compare_symbol in
+  let irr ~full_orbit =
+    let rs, _ = bool_synth_full ~full_orbit in
+    List.sort_uniq (Types.term_compare bcmp)
+      (List.map (fun (t, _, _) -> t) rs.Algorithm.behaviors) in
+  let off = irr ~full_orbit:false and on = irr ~full_orbit:true in
+  if List.length off <> List.length on
+     || not (List.for_all2 (fun a b -> Types.term_eq bcmp a b) off on) then begin
+    Printf.eprintf "  orbit-dependent irreducibles: |off|=%d |on|=%d\n"
+      (List.length off) (List.length on);
+    assert false
+  end;
+  Printf.printf "  orbit-independent irreducibles: OK (%d)\n" (List.length off)
+
+(* The default-off `one_per_class` optimization keeps a single representative
+   per behavior class: a subset of the antichain (fewer irreducibles, all with
+   distinct bv) that stays self-consistent — but is not complete. *)
+let test_one_per_class () =
+  let bcmp = Domain_bool.compare_symbol in
+  let synth ~one_per_class =
+    let rs, _ = Algorithm.run ~max_size:7 bool_dom ~num_domains:1
+      ~forced_inputs:(Domain_bool.all_inputs 3) ~num_random_inputs:0
+      ~max_vcs:3 ~max_holes:3 ~use_smt:false ~one_per_class in
+    rs in
+  let rs1 = synth ~one_per_class:true and rs0 = synth ~one_per_class:false in
+  let n1 = List.length rs1.Algorithm.behaviors
+  and n0 = List.length rs0.Algorithm.behaviors in
+  assert (n1 <= n0);
+  (* one irreducible per behavior class ⇒ all bvs distinct *)
+  let compiled = Array.of_list (List.map Eval.compile (Domain_bool.all_inputs 3)) in
+  let bvs = List.map (fun (t, _, _) -> Eval.behavior_compiled_arr bool_dom compiled t)
+      rs1.Algorithm.behaviors in
+  assert (List.length (List.sort_uniq compare bvs) = List.length bvs);
+  (* still self-consistent: no listed irreducible is reduced by its own rules *)
+  let idx = Rewrite.index_rules (rs1.Algorithm.size_rules @ rs1.Algorithm.kbo_rules) in
+  List.iter (fun (t, _, _) ->
+    assert (Types.term_eq bcmp (Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx t) t))
+    rs1.Algorithm.behaviors;
+  Printf.printf "  one-per-class optimization: OK (%d <= %d, distinct bv, self-consistent)\n" n1 n0
+
 let () = Printf.printf "Running tests...\n";
   test_canonicalize (); test_distinct_vcs (); test_size (); test_has_hole ();
   test_kbo (); test_match_subst (); test_match_var_const ();
@@ -1399,4 +1502,8 @@ let () = Printf.printf "Running tests...\n";
   test_algorithm_int (); test_algorithm_bool (); test_size_progression ();
   test_forced_inputs (); test_all_bool_inputs ();
   test_holes_required_for_completeness ();
+  test_rules_kbo_oriented ();
+  test_irreducibles_self_consistent ();
+  test_orbit_independent_irreducibles ();
+  test_one_per_class ();
   Printf.printf "All tests passed!\n"
