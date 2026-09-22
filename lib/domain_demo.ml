@@ -30,6 +30,7 @@ let demo_domain : (symbol, int) Domain.t = {
   Domain.all_symbols = all_symbols;
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.is_ac = (function Plus -> true | Zero -> false);
   Domain.term_to_string = Types.to_string string_of_symbol;
   Domain.term_of_string = Parse.term_parser all_symbols;
   Domain.int_to_val = (fun n -> n);

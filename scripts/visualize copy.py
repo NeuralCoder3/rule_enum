@@ -11,20 +11,11 @@ This plots the five requested series against `size`:
 (and `size` is the x-axis), and emits a standalone LaTeX/pgfplots
 version of the same figure.
 
-When the run's three constants (c0, c1, c2) are known — given via --constants,
-named via --ref-name, or inferred from the file name (e.g. bool_v0c3 -> 3,1,3;
-bool_vcs3 -> 6,1,3) — a dotted black growth estimate
-  (c1 + 2*sqrt(c0*c2)**n) / n**(2/3)
-is overlaid, drawn only where it fits inside the frame (at or below the peak of
-the enumerated line, which sets the y-axis top).
-
 Usage:
   ./visualize.py stats.csv                  # writes stats_stats.png and stats_stats.tex
   ./visualize.py stats.csv -o out/plot      # writes out/plot.png, out/plot.tex
   ./visualize.py stats.csv --log            # log-scale y axis
   ./visualize.py stats.csv --no-show        # don't open a window
-  ./visualize.py bool_vcs3.csv              # infers c0,c1,c2 = 6,1,3 -> estimate curve
-  ./visualize.py x.csv --constants 6,1,3    # explicit estimate constants
 """
 
 import argparse
@@ -48,65 +39,6 @@ STYLE = {
     "new_irreducibles": ("#9467bd", "diamond*", "D"),
 }
 
-# Known (c0, c1, c2) for the growth-estimate reference curve, keyed by run name.
-# c0 = number of distinct leaves (v0c3: 3 holes; vcs3: 3 vars + 3 holes = 6);
-# c1, c2 are the additive/scale constants of the estimate (see ref_series).
-KNOWN_CONSTANTS = {
-    # "bool_v0c3": (3, 1, 3),
-    # "bool_vcs3": (6, 1, 3),
-}
-
-
-def resolve_constants(args, csv_path):
-    """Return (c0, c1, c2) from --constants, --ref-name, or the file name, else None."""
-    if args.constants:
-        parts = args.constants.split(",")
-        if len(parts) != 3:
-            sys.exit("error: --constants must be 'c0,c1,c2'")
-        return tuple(float(x) for x in parts)
-    name = args.ref_name or os.path.basename(os.path.splitext(csv_path)[0])
-    if name in KNOWN_CONSTANTS:
-        return KNOWN_CONSTANTS[name]
-    for k in sorted(KNOWN_CONSTANTS, key=len, reverse=True):   # longest match wins
-        if k in name:
-            return KNOWN_CONSTANTS[k]
-    if args.ref_name:
-        print(f"--ref-name {args.ref_name!r} unknown (have {list(KNOWN_CONSTANTS)}); "
-              f"pass --constants c0,c1,c2 instead", file=sys.stderr)
-    return None
-
-def estimate(n, c0,c1,c2):
-    import math
-    c = math.sqrt(c1+2*math.sqrt(c0*c2))*(c0*c2)**(0.25)/(2*c2*math.sqrt(math.pi))
-    # return c*(c1+2*math.sqrt(c0*c2))**(n)/(n**(1.5))
-    return (c1+2*math.sqrt(c0*c2))**(n)/(n**(1.5))
-
-def ref_series(cols, consts):
-    """Estimate (c1 + 2*sqrt(c0*c2)**n) / n**(2/3) per term size n.
-
-    Returned as (n, y) points, kept only where the estimate fits inside the frame
-    — i.e. at or below the top of the enumerated line (its peak), which is what
-    sets the y-axis upper bound.  Points that would shoot past it (and rescale the
-    axes) are dropped so the dotted curve always stays on screen.
-    """
-    import math
-    c0, c1, c2 = consts
-    # base = math.sqrt(c0 * c2)
-    ceiling = max(cols["enumerated"]) if cols["enumerated"] else 0
-    pts = []
-    for n in cols["size"]:
-        if n <= 0:
-            continue
-        try:
-            # y = (c1 + 2 * base ** n) / (n ** (3.0 / 2.0))
-            y = estimate(n, c0, c1, c2)
-            print(f"n={n} -> y={y:.2e} (c0={c0}, c1={c1}, c2={c2})")
-        except OverflowError:
-            continue
-        if 0 < y <= 10*ceiling:              # fits under the enumerated line's peak
-            pts.append((n, y))
-    return pts
-
 
 def read_csv(path):
     """Return dict column-name -> list of floats, plus the row count."""
@@ -125,14 +57,7 @@ def read_csv(path):
     return cols
 
 
-def ref_label(consts):
-    c0, c1, c2 = consts
-    # return (rf"$(c_1{{+}}2\sqrt{{c_0c_2}}^{{\,n}})/n^{{2/3}}$ "
-    #         rf"($c_0{{=}}{c0:g},c_1{{=}}{c1:g},c_2{{=}}{c2:g}$)")
-    return r"$\approx T(n)$"
-
-
-def plot_png(cols, out_png, log, show, title, ref=None):
+def plot_png(cols, out_png, log, show, title):
     try:
         import matplotlib
         if not show:
@@ -148,10 +73,6 @@ def plot_png(cols, out_png, log, show, title, ref=None):
         color, _mark, marker = STYLE[s]
         ax.plot(x, cols[s], marker=marker, markersize=4, linewidth=1.5,
                 color=color, label=LABELS[s])
-    if ref and ref[0]:
-        pts, consts = ref
-        ax.plot([p[0] for p in pts], [p[1] for p in pts], ":", color="black",
-                linewidth=1.8, label=ref_label(consts))
     ax.set_xlabel("term size")
     ax.set_ylabel("count" + (" (log scale)" if log else ""))
     if log:
@@ -166,7 +87,7 @@ def plot_png(cols, out_png, log, show, title, ref=None):
         plt.show()
 
 
-def latex_code(cols, log, title, ref=None):
+def latex_code(cols, log, title):
     """Standalone pgfplots document reproducing the figure."""
     sizes = cols["size"]
     # One coordinates block per series.
@@ -180,14 +101,6 @@ def latex_code(cols, log, title, ref=None):
             f"    \\definecolor{{c{cname}}}{{HTML}}{{{color.lstrip('#')}}}\n"
             f"    \\addplot[color=c{cname}, mark={mark}, thick] coordinates {{{coords}}};\n"
             f"    \\addlegendentry{{{LABELS[s].replace('_', r'\_')}}}"
-        )
-    if ref and ref[0]:
-        pts, consts = ref
-        coords = " ".join(f"({sz:g},{v:g})" for sz, v in pts)
-        plots.append(
-            f"    \\addplot[black, densely dotted, thick, mark=none] coordinates {{{coords}}};\n"
-            # f"    \\addlegendentry{{$(c_1+2\\sqrt{{c_0c_2}}^{{\\,n}})/n^{{2/3}}$}}"
-            f"    \\addlegendentry{{{ref_label(consts)}}}"
         )
     ymode = "ymode=log,\n      " if log else ""
     body = "\n".join(plots)
@@ -225,12 +138,6 @@ def main():
     ap.add_argument("--no-show", dest="show", action="store_false",
                     help="do not open a plot window")
     ap.add_argument("--title", help="plot title (default: CSV filename)")
-    ap.add_argument("--ref-name",
-                    help="known run name for the growth-estimate constants "
-                         f"(one of {list(KNOWN_CONSTANTS)}); else inferred from the file name")
-    ap.add_argument("--constants",
-                    help="explicit 'c0,c1,c2' for the growth estimate "
-                         "(c1+2*sqrt(c0*c2)**n)/n**(2/3), overrides --ref-name")
     args = ap.parse_args()
 
     cols = read_csv(args.csv)
@@ -245,15 +152,9 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    consts = resolve_constants(args, args.csv)
-    ref = (ref_series(cols, consts), consts) if consts else None
-    if ref and not ref[0]:
-        print("growth estimate computed but never fits within the frame "
-              "(stays above the enumerated peak); not drawn", file=sys.stderr)
+    plot_png(cols, base + ".png", args.log, args.show, title)
 
-    plot_png(cols, base + ".png", args.log, args.show, title, ref)
-
-    tex = latex_code(cols, args.log, title, ref)
+    tex = latex_code(cols, args.log, title)
     with open(base + ".tex", "w") as f:
         f.write(tex)
     print(f"wrote {base}.tex")

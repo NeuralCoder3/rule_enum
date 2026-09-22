@@ -18,6 +18,9 @@ type ('s, 'a) t = {
   all_symbols : (string * int * 's) list;
   sym_to_string : 's -> string;
   sym_compare  : 's -> 's -> int;
+  (* True for operators that are associative AND commutative (used by the
+     optional AC matcher). Must be binary operators. *)
+  is_ac : 's -> bool;
   (* Term rendering / parsing for this domain. Round-trip:
      `term_of_string (term_to_string t) = t`. Both are wired from the
      shared grammar helpers (`Types.to_string`, `Parse.term_parser`) over

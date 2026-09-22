@@ -1,4 +1,3 @@
-_build/
 .git/
 _build/
 enum_rules/
@@ -7,3 +6,13 @@ enum_rules/
 output/
 *.txt
 *.md
+
+proof/
+eval/
+scripts/
+experiment/
+latex/
+fstar/
+graphics/
+.claude/
+*.zip

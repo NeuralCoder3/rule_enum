@@ -115,25 +115,49 @@ variable rules and vice versa.
 
 Ruler synthesizes boolean rulesets via equality saturation; the number of
 iterations bounds the size of the rules it can produce. **Ruler `it2` produces
-rules with terms up to size 5; `it4` up to size 9.** To compare like with like
-we restrict *our* synthesis to the matching size cap (`--max-size 5/7/9`,
-written `s5`/`s7`/`s9`) and check mutual derivability with Ruler's own `derive`
-checker. `forward` = how many of **our** rules Ruler can re-derive; `reverse` =
-how many of **Ruler's** rules **our** set derives.
+rules with terms up to size 5; `it3` up to size 7; `it4` up to size 9.** To
+compare like with like we restrict *our* synthesis to the matching size cap
+(`--max-size 5/7/9`, written `s5`/`s7`/`s9`) and check mutual derivability with
+Ruler's own `derive` checker. `forward` = how many of **our** rules Ruler can
+re-derive; `reverse` = how many of **Ruler's** rules **our** set derives.
 
 | comparison (matched size) | Ruler ⊢ ours | ours ⊢ Ruler |
 |---------------------------|:------------:|:------------:|
 | `it2` ↔ `s5`  (size ≤ 5) | 154 / 0 | 18 / 0 |
-| `it4` ↔ `s7`  (size ≤ 7) | 1431 / **2** | 32 / **1** |
+| `it3` ↔ `s7`  (size ≤ 7) | 1431 / **2** | **27 / 0** |
 | `it4` ↔ `s9`  (size ≤ 9) | 8890 / **645** | **33 / 0** |
 
 - **Size ≤ 5 — perfectly mutual.** Every rule of each system is derivable from
   the other; the two approaches agree exactly on the small-rule theory.
-- **Size ≤ 7 — near-mutual.** Ruler derives all but 2 of our rules; we derive
-  all but 1 of Ruler's. The residual handful are orientation artifacts.
+- **Size ≤ 7 — near-mutual, in our favour.** Comparing the *size-matched* sets
+  (`it3` produces exactly the size-≤7 rules), we derive **all 27** of Ruler's
+  rules, while Ruler derives all but **2** of our 1433. (Using the over-sized
+  `it4` against `s7` instead leaves one of Ruler's size-9 rules outside our s7
+  reach — `32 / 1`; the matched `it3` removes that artifact.)
 - **Size ≤ 9 — we are strictly stronger.** Our rules derive **100 % (33/33)** of
   Ruler's, while Ruler **fails to derive 645** of ours. At this size our
   exhaustive enumeration finds equalities Ruler's bounded saturation misses.
+
+**Mismatched depth vs. size cap.** Pairing Ruler's depth against a *different*
+size cap isolates the two failure modes; the not-derivable counts move exactly as
+the size bounds predict:
+
+| comparison (mismatched) | Ruler ⊢ ours | ours ⊢ Ruler | Ruler vs. ours size |
+|-------------------------|:------------:|:------------:|---------------------|
+| `it3` ↔ `s5` | 154 / **0** | 22 / **5** | Ruler deeper (7 > 5) |
+| `it4` ↔ `s7` | 1431 / **2** | 32 / **1** | Ruler deeper (9 > 7) |
+| `it2` ↔ `s7` | 1310 / **123** | 18 / **0** | Ruler shallower (5 < 7) |
+| `it3` ↔ `s9` | 9297 / **238** | 27 / **0** | Ruler shallower (7 < 9) |
+
+- **ours ⊢ Ruler fails only when Ruler reaches past our cap** (`it3↔s5`: 5 of
+  Ruler's size-6/7 rules lie beyond `s5`; `it4↔s7`: 1 size-9 rule beyond `s7`).
+  Whenever our cap ≥ Ruler's depth (`it2↔s7`, `it3↔s9`) we derive **every** Ruler
+  rule.
+- **Ruler ⊢ ours fails when Ruler is too shallow for our rules** (`it2↔s7`: 123
+  of our 1433 s7 rules; `it3↔s9`: 238 of our 9535 s9 rules) — bounded saturation
+  simply never reaches those equalities, while a deeper-than-our-cap Ruler
+  derives (nearly) all of ours. The matched diagonal above is the fair summary;
+  these off-diagonal rows confirm both gaps are purely the size/depth mismatch.
 
 As a sanity check we also normalized Ruler's own rule terms with our rules
 (`eval/ruler/ruler_bool_3_2_0_norm_vcs3.txt`): every Ruler equality collapses to
@@ -143,8 +167,9 @@ a single normal form, i.e. **our rules prove all of Ruler's equalities**.
 
 How long does it take to *produce* these rule sets? Our times are the cumulative
 synthesis wall-clock (from the run logs, 4 workers); Ruler's are re-measured on
-the same machine (`./target/debug/bool synth --variables 3 --iters {2,4}`).
-Recall `it2 ≈ size 5`, `it4 ≈ size 9`.
+the same machine with the **release** build
+(`./target/release/bool synth --variables 3 --iters {2,3,4}`).
+Recall `it2 ≈ size 5`, `it3 ≈ size 7`, `it4 ≈ size 9`.
 
 | rule set | rules | synth time |
 |----------|------:|-----------:|
@@ -153,13 +178,17 @@ Recall `it2 ≈ size 5`, `it4 ≈ size 9`.
 | ours, vars+holes, size ≤ 5 (`bool_vcs3_s5`) | 227 | < 0.05 s |
 | ours, vars+holes, size ≤ 9 (`bool_vcs3_s9`) | 4 213 | 1.1 s |
 | ours, vars+holes, **full / complete** (`bool_vcs3`) | 117 265 | 9 985 s (≈ 2.8 h) |
-| Ruler `it2` (≈ size 5) | 18 | 0.29 s |
-| Ruler `it4` (≈ size 9) | 33 | 128 s |
+| Ruler `it2` (≈ size 5) | 18 | 0.02 s |
+| Ruler `it3` (≈ size 7) | 27 | 0.08 s |
+| Ruler `it4` (≈ size 9) | 33 | 24 s |
 
-**(1) Reaching a given rule size is cheap for us.** Our size-9
-variable set (4 213 rules) is synthesized in **1.1 s**, ~100× faster than Ruler's
-**128 s** for its size-9 set — exhaustive size-stratified enumeration up to size 9
-is far cheaper than 4 iterations of equality saturation. 
+**(1) Reaching a given rule size is cheap for us.** Our size-9 variable set
+(4 213 rules) is synthesized in **1.1 s**, ~20× faster than Ruler's **24 s** for
+its size-9 set — and Ruler's cost jumps sharply with depth (0.02 s → 0.08 s →
+24 s for it2/it3/it4) as equality saturation explores ever larger terms, whereas
+our size-stratified enumeration grows smoothly.
+
+
 ---
 
 ## Simplification of random terms
@@ -171,44 +200,35 @@ We greedily normalize them with various rule sets and plot the cumulative
 distribution of normal-form sizes (a curve that reaches 1.0 on the left means
 "almost everything reduced to something small").
 
-### Completeness drives reduction
+### Completeness drives reduction — and variables help when truncated
 
-![simplification vs rule-set completeness](eval/terms/fig_completeness.png)
+![simplification vs rule-set completeness, holes-only vs vars+holes](eval/terms/fig_completeness_combined.png)
 
-*Figure RQ4a. 1000 size-500 random terms (holes-only rules). Capped rule sets are
-**incomplete**, so the greedy normalizer gets stuck: medians 423 (s5), 342 (s7),
-256 (s9). The **complete** set reduces every term to size ≤ 10.*
+*Figure RQ4a. 1000 size-500 random terms. Each rule size is one hue; the **lighter**
+shade is holes-only, the **darker** shade is vars+holes. Medians — size 5: 423
+(holes) → 228 (vars); size 9: 256 (holes) → **16** (vars); full: 4 (both, curves
+coincide).*
 
-The key structural fact: **the largest irreducible in the complete holes-only
-set has size 10** (`bool_v0c3` has 232 irreducibles, the biggest of size 10).
-Since a greedy normal form is by definition an irreducible, **no term can
-normalize to anything larger than 10** — and indeed all 1000 size-500 random
-terms reduce to size ≤ 10 (median 4). The capped sets `s5/s7/s9` only know rules
-up to that size, so once a term is rewritten below the cap they have nothing
-left to apply and it remains large; raising the cap monotonically shifts the
-whole distribution left, converging to the complete-set wall at 10.
+Two effects in one picture:
 
-### Variables make incomplete rule sets far stronger
+- **Completeness sets a hard wall.** The largest irreducible in the complete set
+  has size 10 (`bool_v0c3`: 232 irreducibles, biggest of size 10). Since a greedy
+  normal form *is* an irreducible, **no term can normalize above 10** — and indeed
+  all 1000 terms reduce to size ≤ 10 (median 4). Capped sets `s5/s7/s9` only know
+  rules up to the cap, so once a term drops below it they stall; raising the cap
+  shifts the whole distribution left, converging to that size-10 wall.
+- **Variables dominate at a given cap** (darker vs. lighter of the same hue). A
+  variable rule like `A&A -> A` matches *any* subterm, so size-capped variable
+  sets fire all over a random term, while holes-only capped sets match only exact
+  constant patterns and rarely fire: at size 9 the variable median is **16** vs.
+  256 holes-only. Once *complete*, the two coincide exactly (both green curves
+  overlap — same normal forms on all 1000 terms), confirming they decide the same
+  theory (Section 2) — but the variable system gets there with far fewer, more
+  general rules and is far more effective when truncated.
 
-The same sweep with the *variable* rule sets (`bool_vcs3_s5/s9/full`) tells a
-sharper story:
-
-![simplification vs completeness, with variables](eval/terms/fig_completeness_vars.png)
-
-*Figure RQ4b. 1000 size-500 random terms, **variable** rules. At the same size
-caps the medians are 228 (s5) and **16** (s9) — versus 423 and 256 for the
-holes-only sets in Fig. RQ4a. The complete (full) curve is **identical** to the
-holes-only full curve (median 4, max 10).*
-
-This is the practical payoff of generality (cf. Section 2). A variable rule like
-`A&A -> A` matches *any* subterm, so the size-capped variable sets fire all over
-a random term; the holes-only capped sets only match exact constant patterns and
-rarely fire. Hence at size 9 the variable rules already reduce the median to 16
-while the holes-only rules are stuck at 256. Once *complete*, the two agree
-exactly — the full variable and full holes-only sets produce the **same** normal
-forms on all 1000 terms (confirming the Section 2 claim that they decide the same
-theory), but the variable system gets there with far fewer, more general rules
-and is far more effective when truncated.
+*(The per-setting views are also kept separately as
+`eval/terms/fig_completeness.{png,tex}` (holes-only) and
+`fig_completeness_vars.{png,tex}` (vars+holes).)*
 
 ### Ruler vs. ours, greedy
 
@@ -232,50 +252,113 @@ not.
 ### Ruler vs. ours, equality saturation (e-graph)
 
 Running the *same* rule sets in an e-graph (`scripts/egglog/simplify.py`,
-**shared / parallel** mode — all 1000 terms in one e-graph, 2 saturation
-iterations) is the fair setting for Ruler's bidirectional rules:
+**sequential** mode — one fresh e-graph per term, 2 iterations), matched at each
+rule size:
 
-![Ruler vs. ours, e-graph](eval/terms/fig_eqsat.png)
+![Ruler vs. ours, e-graph (sequential)](eval/terms/fig_eqsat.png)
 
-*Figure RQ4d. 1000 size-50 random terms, equality saturation (shared e-graph,
-parallel mode). Medians: Ruler `it2` 6, `it4` 4, ours `s5` directed 10, ours
-`s5` **bidirectional 4**.*
+*Figure RQ4d. 1000 size-50 random terms, sequential e-graph (per-term, 2
+iterations). Medians: Ruler `it2` 36, ours `s5` directed 29, ours `s5`
+**bidirectional 24**; Ruler `it4` 34.*
 
-Two observations. (1) **Equality saturation is far more powerful than greedy for
-these compact rule sets** — Ruler's `it4` median drops from 46 (greedy) to 4
-(e-graph). (2) As emitted, Ruler's rules *edge out* ours at matched size (Ruler
-`it2` median 6 vs. ours `s5` median 10) — the mirror image of the greedy result.
+Two observations. (1) **At matched rule size our rules beat Ruler's in the
+sequential e-graph** (s5 29 vs. it2 36 at size 5) — the same ordering as greedy,
+because per-term saturation with a small iteration budget rewards our larger,
+directed, size-reducing rule sets. (2) **Making our rules bidirectional helps
+further** (s5 directed 29 → bidirectional 24): we re-ran `s5` with every rule
+marked two-way wherever the reverse is a valid grounded rewrite (123 of 154
+reverse cleanly; the other 31 have a bare-variable rhs like `?a&?a -> ?a` that
+cannot be a left-hand side).
 
-**The gap is orientation, not coverage.** Ruler emits
-**bidirectional** rules (**10 of its 18** are two-way, including
-associativity/commutativity `(&?a ?b) <-> (&?b ?a)`), whereas our exported rules
-are **0 of 154** bidirectional — every one a single directed, size/KBO-decreasing
-rewrite. In an e-graph, two-way AC rules explore *all* reorderings of a subterm
-within the fixed 2-iteration budget; our directed rules only push toward the
-KBO-minimal side, so saturation reaches fewer equivalent forms.
+**Our `s9` set is impractical in *either* e-graph mode.** With 9535 rules it
+blows up the shared/parallel graph (OOM) and is pathologically slow per-term in
+sequential mode (egglog reloads all 9535 rules into each of the 1000 e-graphs —
+it had processed only 700/1000 terms after 28 min and was killed), so it is
+omitted from the plot. Greedy / discrimination-tree handles the same 9535 rules
+on these terms in well under a second (Fig. RQ4e) — large oriented rule sets
+suit greedy indexing, not e-graph rule registration.
 
-To test this we re-ran our `s5` set with every rule marked **bidirectional
-wherever the reverse is a valid grounded rewrite** (123 of 154 reverse cleanly;
-the other 31 have a bare-variable rhs like `?a&?a -> ?a` that cannot be a
-left-hand side). The result (cyan curve) **flips the ranking**: our bidirectional
-`s5` reaches **median 4 / mean 5.1 / max 28**, beating Ruler `it2` (median 6,
-mean 10.7) at the same size and matching Ruler `it4`. So our underperformance in
-the e-graph was purely the directed orientation we ship for greedy rewriting —
-once the rules are made two-way, our larger, more-complete set is the strongest.
-(The holes-vs-vars distinction is irrelevant here: the converter maps both holes
-and object variables to e-graph pattern variables `?a`.) Directed, terminating
-rules are exactly what a single greedy / discrimination-tree pass wants — which
-is why the picture flips again in Fig. RQ4c.
+The picture **flips under the shared/parallel e-graph** (kept as
+`fig_eqsat_parallel`, not shown): there Ruler's compact bidirectional AC rules
+exploit cross-term sharing and edge ours out (Ruler `it2` median 6 vs. ours `s5`
+10). The two settings reward opposite rule styles — but in neither does the
+e-graph beat our greedy / discrimination-tree pass on these terms (cf. Fig. RQ4e).
 
-**Why ours `s9` is not in the e-graph plot.** Our exported rule sets are *large
-and redundant*: `bool_v0c3_s9` expands to **9535** rewrite rules (vs. 33 for
-Ruler `it4`), because we emit every size-reducing pattern, not a compact
-generating set. Loaded wholesale into a *shared* e-graph over 1000 terms this
-blows up (the run did not saturate). 
+### Parallel vs. sequential e-graph: a quality/speed trade-off
 
-*(We also has a per-term `sequential` mode; `eqsat_*_sequential` is slower
-and weaker than the shared-e-graph `parallel` mode and is kept only for
-reference.)*
+The egglog normalizer offers two modes — **parallel** (all input terms share one
+e-graph) and **sequential** (a fresh e-graph per term). They behave very
+differently, which matters for reading the figures above: `fig_eqsat` uses
+**sequential**, the engine sweep below uses both. We isolate the difference with
+a controlled run (Ruler `it2`, fixed `--iters 2`, size-50 terms) sweeping the
+**term count** — the axis that drives the trade-off:
+
+![parallel vs sequential by term count](eval/terms/bench/fig_parvsseq.png)
+
+*Figure RQ4d′. Ruler it2, 2 iterations, size-50 terms. Left: median normal-form
+size vs. term count; right: wall-clock (log-log).*
+
+| terms | parallel median / wall | sequential median / wall |
+|------:|-----------------------:|-------------------------:|
+| 10   | 29 / 0.4 s  | 33 / 0.5 s |
+| 50   | 26 / 1.4 s  | 37 / 1.5 s |
+| 250  | 22 / 18 s   | 37 / 6.7 s |
+| 1000 | **6** / 230 s | 36 / 26 s |
+
+- **Quality: parallel improves with more terms; sequential is flat.** In the
+  shared graph, a rule fired once benefits *every* term containing that subterm
+  and equal subterms collapse, so the more terms present the richer the graph and
+  the deeper each term gets simplified (median 29 → **6** from 10 → 1000 terms).
+  Sequential normalizes each term in isolation with only its own 2 iterations, so
+  adding terms helps none of them (median stays ~36).
+- **Speed: sequential is ~linear in term count; parallel is super-linear.** Each
+  sequential e-graph is small and independent, so cost scales with the number of
+  terms (0.5 → 26 s). The single shared graph instead *swells* with every term
+  added, so its saturation and per-term extraction grow faster than linearly
+  (0.4 → **230 s**). They cross around ~50 terms.
+
+So "parallel is usually faster" (egglog's own description) is misleading for this
+workload: parallel is usually **better** (via cross-term sharing) but, with these
+AC rules, **slower** once there are more than a few dozen terms. We use
+**sequential** for the matched-size `fig_eqsat` comparison (per-term budget, no
+shared-graph blow-up) and report parallel separately as `fig_eqsat_parallel`.
+*(All parallel/sequential term counts: `fig_eqsat` uses 1000 size-50 terms; the
+engine sweep below uses 50 terms per size; this controlled study uses 10–1000.)*
+
+Sweeping **both** axes (term size × term count, Ruler it2, 2 iters) confirms the
+trade-off across the whole grid:
+
+![parallel vs sequential matrix (size × count)](eval/terms/bench/fig_matrix.png)
+
+*Figure RQ4d″. Median normal-form size (top) and wall-clock (bottom) for parallel
+(left) and sequential (right) over a term-size × term-count grid. Hatched =
+OOM/timeout (16 GB / 300 s caps).*
+
+| | parallel (median / wall) | sequential (median / wall) |
+|---|---|---|
+| 50 × 10 | 29 / 0.4 s | 33 / 0.5 s |
+| 50 × 1000 | **6** / 231 s | 36 / 26 s |
+| 250 × 100 | 85 / 41 s | 167 / 13 s |
+| 250 × 1000 | ✗ OOM/TO | 162 / 126 s |
+| 1000 × 10 | 343 / 4.8 s | 499 / 4.3 s |
+| 1000 × 100 | 147 / 281 s | 429 / 41 s |
+| 1000 × 1000 | ✗ TO (13 GB) | ✗ OOM/TO |
+
+Reading the grid:
+- **Parallel gives better quality in *every* completed cell** (lower median —
+  cross-term sharing), and its edge widens with term count (e.g. 1000×100:
+  147 vs. 429) and even helps at count 10 (1000×10: 343 vs. 499).
+- **Parallel's cost grows with *both* axes** (one shared graph, size × count
+  nodes): cheap at low count (1000×10 in 4.8 s) but 281 s at 1000×100, and it
+  OOM/times-out a cell *earlier* than sequential (it loses 250×1000 and
+  1000×1000; sequential only loses 1000×1000).
+- **Sequential is the robust default**: flat quality in count, ~linear wall, and
+  it completes more of the grid — at the price of worse normal forms.
+
+Net: use **parallel** when you have many small-to-medium terms and want the best
+simplification (and can afford the time); use **sequential** for large terms or
+large batches where the shared graph would blow up. Greedy (Fig. RQ4e) sidesteps
+both — flat and sub-second across this entire grid.
 
 ### Engines compared: greedy vs. e-graph (parallel / sequential)
 
@@ -328,36 +411,38 @@ Full matrix and trajectories: `eval/terms/bench/FINDINGS.md`.
 ### Headline: our greedy vs. Ruler's e-graph
 
 The fairest single picture pits each tool's *intended* normalizer against the
-other's: Ruler's rules under **equality saturation** (its designed setting) vs.
-our (variable) rules under **plain greedy** normalization (ours), at the matched
-size 9 and with our full complete set.
+other's: Ruler's rules under **equality saturation** (sequential, per-term — its
+designed setting applied per term) vs. our (variable) rules under **plain greedy**
+normalization, at the matched size 9 and with our full complete set.
 
 ![Ruler e-graph vs ours greedy](eval/terms/fig_final.png)
 
-*Figure RQ4e. 1000 size-50 random terms. Ruler `it4` in a full e-graph reaches
-median 4 (max 29); our variable `s9` rules under a single greedy /
+*Figure RQ4e. 1000 size-50 random terms. Ruler `it4` in a sequential e-graph
+reaches median 34 (max 50); our variable `s9` rules under a single greedy /
 discrimination-tree pass reach median 6 (max 35); our **full** rules under the
 same greedy pass reach **median 4, max 10**.*
 
-Two takeaways. **(1) Even our cheap, size-9 greedy pass is competitive with
-Ruler's full equality-saturation machinery** — medians 6 vs. 4, within ~2 nodes,
-without building an e-graph at all. **(2) Our *complete* set under plain greedy
-*matches* Ruler's e-graph on the median (4 vs. 4) and is strictly better in the
-worst case (max 10 vs. 29):** because every greedy normal form is an irreducible,
-our complete set cannot leave anything above size 10 (the largest irreducible),
-whereas the bounded e-graph still has a tail out to 29. (For reference, *holes-only*
-greedy at size 9 reaches only median 23 — the variable rules are what make greedy
-competitive at a size cap, cf. Fig. RQ4b.)
+**Greedy dominates.** Our cheap size-9 greedy pass (median 6) already beats
+Ruler's per-term e-graph (median 34), and our complete set drives *every* term to
+≤ 10 (median 4) — because every greedy normal form is an irreducible, so nothing
+can exceed the largest irreducible (size 10). (For reference, *holes-only* greedy
+at size 9 reaches only median 23 — the variable rules are what make greedy
+competitive at a size cap, cf. Fig. RQ4a. With the *shared/parallel* e-graph,
+kept as `fig_final_parallel`, Ruler `it4` reaches median 4 — still no better than
+our complete greedy set, which also caps the worst case at 10 vs. the e-graph's
+tail to 29.)
 
 The same comparison on **size-1000** inputs sharpens the picture:
 
 ![size-1000 normal-form distribution](eval/terms/bench/fig_final_1000.png)
 
 *Figure RQ4e(b). 50 size-1000 random terms. Greedy with the full set reduces
-*every* term to ≤ 9 (median 4); Ruler `it4` in an e-graph has the same median but
-a heavy tail (20 % of terms stay > 10, up to 146); greedy with the size-9 set is
-weakest (median 25). On large terms greedy-full is both the most reliable and the
-only one with a hard size bound.*
+*every* term to ≤ 9 (median 4); greedy with the size-9 set reaches median 25;
+Ruler `it4` in a sequential e-graph (2 iterations per isolated term) barely dents
+them — median 327. On large terms greedy-full is both the most reliable and the
+only one with a hard size bound. (The parallel e-graph, `fig_final_1000_parallel`,
+does better — median 4 — but only by loading all terms into one shared graph,
+which does not scale; see Fig. RQ4f.)*
 
 ---
 
@@ -367,18 +452,18 @@ only one with a hard size bound.*
 2. **Fig. 2** — `eval/bool_v0c3.{png,tex}` beside Fig. 1: vars vs. holes (Sec. 2).
 3. **Table 1** — per-domain final SR/KR/IR + reached size + time (Sec. 1).
 4. **Table 2** — Ruler mutual derivability, the `it4 ↔ s9` row (Sec. 3).
-5. **Fig. 3** — `eval/terms/fig_completeness.{png,tex}`: the completeness wall
-   at size 10 (RQ4a) — the most compelling single simplification figure.
-6. **Fig. 4** — `eval/terms/fig_completeness_vars.{png,tex}` beside Fig. 3: the
-   same with variables (RQ4b) — incomplete variable sets already simplify well.
-7. **Fig. 5** — `eval/terms/fig_ruler.{png,tex}` and
+5. **Fig. 3** — `eval/terms/fig_completeness_combined.{png,tex}` (RQ4a): the
+   completeness wall at size 10 *and* the holes-vs-vars gap in one figure (lighter
+   = holes-only, darker = vars+holes; darker sits far left at every cap, both
+   coincide at full) — the most compelling single simplification figure.
+6. **Fig. 5** — `eval/terms/fig_ruler.{png,tex}` and
    `eval/terms/fig_eqsat.{png,tex}` side by side (RQ4c/d): Ruler vs. ours under
    greedy vs. e-graph — the method-vs-rule-style story.
 8. **Fig. 6 (headline)** — `eval/terms/fig_final.{png,tex}` (RQ4e): our plain
    greedy (size 9 and full) vs. Ruler's e-graph — our complete set matches the
    e-graph median and beats its worst case, no e-graph needed.
 9. **Table 3** — synthesis cost (§3): our size-5/9 holes/vars and full runs vs.
-   Ruler `it2`/`it4` generation time.
+   Ruler `it2`/`it3`/`it4` generation time (release build).
 
 ---
 
@@ -437,11 +522,14 @@ eval/
     ruler_term_50__3_{2,4}_0.txt   greedy normal forms using RULER's rules
     eqsat_{ruler_itN,v0c3_sN}_bool_50_3__it2_{parallel,sequential}.txt
                                 e-graph normal forms (scripts/egglog/simplify.py)
-    fig_completeness.{png,tex}       RQ4a figure (holes-only greedy)   (scripts/plot_eval.py)
-    fig_completeness_vars.{png,tex}  RQ4b figure (variables greedy)
+    fig_completeness_combined.{png,tex}  RQ4a figure (holes vs vars, by size)  (scripts/plot_eval.py)
+    fig_completeness.{png,tex}       per-setting view: holes-only greedy (not in write-up)
+    fig_completeness_vars.{png,tex}  per-setting view: variables greedy (not in write-up)
     fig_ruler.{png,tex}              RQ4c figure (Ruler vs ours, greedy)
-    fig_eqsat.{png,tex}              RQ4d figure (Ruler vs ours, e-graph)
-    fig_final.{png,tex}              RQ4e headline (ours greedy vs Ruler e-graph, size 9)
+    fig_eqsat.{png,tex}              RQ4d figure (Ruler vs ours, e-graph SEQUENTIAL)
+    fig_eqsat_parallel.{png,tex}     same, shared/parallel e-graph (not in write-up)
+    fig_final.{png,tex}              RQ4e headline (ours greedy vs Ruler e-graph SEQUENTIAL)
+    fig_final_parallel.{png,tex}     same, Ruler parallel e-graph (not in write-up)
 scripts/ruler/       OOPSLA'21 Ruler artifact (cargo); derive_*.json are the RQ3 results
 ```
 

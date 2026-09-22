@@ -116,19 +116,25 @@ def estimate_str(c0,c1,c2):
 if __name__ == "__main__":
     for n in [1,2,3,4,5,10,15,20]:
         bool_count = count_terms(n, c0=3, c1=1, c2=3)
+        bool_var_count = count_terms(n, c0=6, c1=1, c2=3)
         bv_count = count_terms(n, c0=3, c1=2, c2=7)
         # print scientific notation for large numbers
         print(f"Size n={n}:")
         print(f"  Bool: {bool_count:.2e}, {bool_count}")
+        print(f"  Bool with Vars: {bool_var_count:.2e}, {bool_var_count}")
         print(f"  BV: {bv_count:.2e}, {bv_count}")
         bool_est = estimate(n, c0=3, c1=1, c2=3)
+        bool_var_est = estimate(n, c0=6, c1=1, c2=3)
         bv_est = estimate(n, c0=3, c1=2, c2=7)
         print(f"  Bool Estimate: {bool_est:.2e}")
+        print(f"  Bool with Vars Estimate: {bool_var_est:.2e}")
         print(f"  BV Estimate: {bv_est:.2e}")
         # bool_est2=g
         
     print("bool")
     estimate_str(c0=3, c1=1, c2=3)
+    print("bool with vars")
+    estimate_str(c0=6, c1=1, c2=3)
     print("bv")
     estimate_str(c0=3, c1=2, c2=7)
 

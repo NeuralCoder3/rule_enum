@@ -77,7 +77,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
       ~max_size ~max_vcs ~max_vars ~max_holes ~num_domains ~domain_name
       ~output_file ~stats_file ~rule_output ~irred_output
       ~use_smt ~use_smt_forced ~assume_unproven ~unknown_inputs ~info ~progress
-      ~minimize ~minimize_size ~full_orbit ~converge_window ~one_per_class =
+      ~minimize ~minimize_size ~full_orbit ~converge_window ~one_per_class ~ac =
   let to_str = dom.Rule_enum.Domain.term_to_string in
   let effective_jobs =
     Rule_enum.Algorithm.effective_num_workers (Some num_domains) in
@@ -105,7 +105,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
   in
   let rs, _iters =
     Rule_enum.Algorithm.run ~max_size dom ~num_random_inputs:num_rand ~full_orbit
-      ~converge_window ~one_per_class
+      ~converge_window ~one_per_class ~ac
       ~max_vcs ~max_vars ~max_holes ~num_domains:effective_jobs
       ~forced_inputs:forced ~use_smt ~use_smt_forced ~assume_unproven
       ?unknown_inputs ~progress
@@ -202,7 +202,7 @@ let run_with (type s) (dom : (s, 'a) Rule_enum.Domain.t) forced num_rand
 (* Eval mode: load a rule set from disk, read input terms one per line,
    normalize each with the loaded rule set, write the normalized forms
    one per line. The output is in the same order as the input. *)
-let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
+let eval_mode ~domain_name ~rules_input ~terms_input ~output_file ~ac =
   let module RE = Rule_enum in
   let load (type s) (dom : (s, _) RE.Domain.t) =
     let sym_cmp = dom.RE.Domain.sym_compare in
@@ -216,6 +216,8 @@ let eval_mode ~domain_name ~rules_input ~terms_input ~output_file =
        alpha-renaming of hole ids at the end, which is appropriate for
        synthesis but wrong for user input — it would map a result like
        `(-B)` (correct semantic answer) to `(-A)` (different meaning). *)
+    if ac then RE.Types.set_ac_config (Some (dom.RE.Domain.is_ac, sym_cmp))
+    else RE.Types.set_ac_config None;
     let index = RE.Rewrite.index_rules rules in
     let normalize t = RE.Rewrite.norm_bottom ~sym_cmp ~index t in
     let out =
@@ -266,6 +268,7 @@ let () =
   let full_orbit = ref false in
   let converge_window = ref 0 in
   let one_per_class = ref false in
+  let use_ac = ref false in
   let minimize = ref false in
   let minimize_size = ref 0 in
   (* -1 = unset → use the algorithm's default (RULE_ENUM_SMT_UNKNOWN_INPUTS). *)
@@ -295,6 +298,7 @@ let () =
     ("--full-orbit", Arg.Set full_orbit, " Emit the full hole-permutation orbit of rules during grouping. Default skips it when --max-holes>0 (the orbit is then redundant: every hole orientation is already enumerated), giving a leaner, faster, equivalent rule set. Forces it on (e.g. for the var-only --max-holes 0 mode, where it stays on automatically).");
     ("--converge-window", Arg.Set_int converge_window, " N  Consecutive no-new-rule sizes required before declaring convergence and stopping early (default: 0). A single quiet size is NOT a true fixpoint — new size-reducing rules can re-appear at a larger size (op(i,j) first occurs at size |i|+|j|+1), so raise this to keep going. N<=0 disables early stopping (enumerate all the way to --max-size).");
     ("--one-per-class", Arg.Set one_per_class, " OPTIMIZATION (default off): keep only ONE irreducible per behavior class instead of the full KBO-minimal antichain. Two equivalent terms can carry different variables and be KBO-incomparable even in every context (e.g. A&a vs a&A), so each is normally its own irreducible. Collapsing to one representative per class enumerates from a single member, giving far fewer irreducibles, much less enumeration, and far fewer SMT confirmations — but is NOT complete: a rule that would only surface by enumerating from a dropped representative is missed.");
+    ("--ac", Arg.Set use_ac, " OPTIONAL: match/canonicalise modulo AC of the domain AC operators (bool: & | ^); collapses AC-equal classes and rules, applies rules modulo AC. Also usable in --eval.");
     ("--minimize-rules", Arg.Set minimize, " Post-pass: drop rules that are redundant (verified to preserve every normal form on ground terms up to the verify size). Shrinks --rule-output; does not speed up synthesis.");
     ("--minimize-size", Arg.Set_int minimize_size, " N  Ground-term size bound for --minimize-rules verification (default: max-size + 2)");
     ("--smt-unknown-inputs", Arg.Set_int smt_unknown_inputs, " N  Extra random inputs to test when SMT returns Unknown (default 1000)");
@@ -311,7 +315,7 @@ let () =
     end;
     eval_mode ~domain_name:!domain_name
       ~rules_input:!rules_input ~terms_input:!terms_input
-      ~output_file:!output_file;
+      ~output_file:!output_file ~ac:!use_ac;
     exit 0
   end;
   (match Sys.getenv_opt "RULE_ENUM_SEED" with
@@ -345,7 +349,7 @@ let () =
         ~use_smt:!use_smt ~use_smt_forced:!use_smt_forced
         ~assume_unproven:(not !safe_mode) ~unknown_inputs ~info:!info
         ~progress:!progress ~minimize:!minimize ~minimize_size:!minimize_size ~full_orbit:!full_orbit
-        ~converge_window:!converge_window ~one_per_class:!one_per_class
+        ~converge_window:!converge_window ~one_per_class:!one_per_class ~ac:!use_ac
   in
   match !domain_name with
   | "int"  -> dispatch Rule_enum.Domain_int.int_domain [] "int"

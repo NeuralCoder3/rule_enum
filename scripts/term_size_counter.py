@@ -39,3 +39,11 @@ if __name__ == "__main__":
     plt.ylabel("Frequency")
     plt.title("Distribution of Term Sizes")
     plt.savefig(sys.argv[3])
+
+    # Also emit a standalone pgfplots .tex next to the .png (same basename).
+    import os
+    import subprocess
+    tex = os.path.splitext(sys.argv[3])[0] + ".tex"
+    subprocess.run([sys.executable,
+                    os.path.join(os.path.dirname(__file__), "count2tex.py"),
+                    sys.argv[2], tex], check=False)

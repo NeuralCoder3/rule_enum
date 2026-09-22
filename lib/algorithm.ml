@@ -430,7 +430,7 @@ type match_kind = Size | Kbo | Skip
    the candidate happens to share its primary bv with one of its own
    anon-variant bvs. *)
 let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
-      ~norm_index ~behaviors ~behaviors_by_bv
+      ~norm_index ?memo ~behaviors ~behaviors_by_bv
       ~use_smt ~sym_cmp t =
   Progress.tick ();
   let prefer a b = if Kbo.compare_total sym_cmp a b < 0 then a else b in
@@ -519,38 +519,69 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
      its holes remapped back onto `simplified`'s live slots. apply_decisions
      SMT-confirms the rule, so a bv false-positive is harmless (the rule is
      rejected and the term simply stays a candidate). *)
-  let holes_in_order t =
-    let seen = Hashtbl.create 4 in let acc = ref [] in
+  (* Leaves of each kind in first-occurrence order. *)
+  let leaves_in_order t =
+    let sv = Hashtbl.create 4 and sh = Hashtbl.create 4 in
+    let av = ref [] and ah = ref [] in
     let rec go = function
-      | Types.Hole n -> if not (Hashtbl.mem seen n) then (Hashtbl.add seen n (); acc := n :: !acc)
-      | Types.Var _ -> () | Types.Node (_, a) -> List.iter go a
-    in go t; List.rev !acc
+      | Types.Var v -> if not (Hashtbl.mem sv v) then (Hashtbl.add sv v (); av := v :: !av)
+      | Types.Hole n -> if not (Hashtbl.mem sh n) then (Hashtbl.add sh n (); ah := n :: !ah)
+      | Types.Node (_, a) -> List.iter go a
+    in go t; (List.rev !av, List.rev !ah)
   in
-  let rename_holes f t =
+  let rename_leaves fv fh t =
     let rec go = function
-      | Types.Hole n -> Types.mk_hole (f n)
-      | Types.Var v -> Types.mk_var v
+      | Types.Var v -> Types.mk_var (fv v)
+      | Types.Hole n -> Types.mk_hole (fh n)
       | Types.Node (s, a) -> Types.mk_node s (List.map go a)
     in go t
   in
   let bv_of t = Eval.behavior_compiled_arr dom compiled_inputs_arr t in
-  let dead_hole_rule simplified bv =
-    let holes = holes_in_order simplified in
-    if List.length holes < 2 then None else
-    let is_dead h =
-      match List.filter (fun x -> x <> h) holes with
-      | [] -> false
-      | h2 :: _ -> bv_of (rename_holes (fun n -> if n = h then h2 else n) simplified) = bv
+  (* Dead-leaf reduction, generalized over Vars and Holes. A leaf the
+     behavior is invariant to (it cancels out) leaves the term in a
+     bv-bucket of its own, so the ordinary bv-lookup never connects it to
+     its smaller true equivalent and it is wrongly kept as a fresh
+     irreducible. Per kind, a leaf is dead if merging it onto another
+     same-kind leaf leaves the bv unchanged; we compact each kind's live
+     leaves to 0..m-1, look the compacted bv up among existing
+     irreducibles, and propose `simplified -> rhs` (rhs = the smaller
+     equivalent with its leaves remapped back onto `simplified`'s live
+     slots). apply_decisions SMT/exhaustively confirms the rule, so a bv
+     false-positive is harmless (rejected; the term stays a candidate).
+
+     Holes close a ground-confluence gap (a constP that cancels, e.g. B in
+     `B-(A+(B+C))` ≡ -(A+C)). Vars are the schema analog and the reason
+     `bool_vcs3` over-counted: a variable the term ignores — e.g. a,b in
+     `(a&b)^((b&a)^c)` ≡ c — must collapse to its support. Otherwise, since
+     same-size commutativity rules are deliberately inert on variables (a
+     var/hole step is KBO-Incomparable), nothing reorients the nested
+     `(b&a)`, the xor-cancellation never fires, and the term survives as a
+     spurious (and oversized) irreducible. *)
+  let dead_leaf_rule simplified bv =
+    let (vars, holes) = leaves_in_order simplified in
+    let dead_of lst mk_rename =
+      List.filter (fun x ->
+        match List.filter (fun y -> y <> x) lst with
+        | [] -> false
+        | y :: _ -> bv_of (mk_rename x y) = bv) lst
     in
-    let dead = List.filter is_dead holes in
-    let live = List.filter (fun h -> not (List.mem h dead)) holes in
-    if dead = [] || live = [] then None else begin
-      (* live holes -> 0..m-1 (first-occurrence order), dead -> m.. so the
-         compacted bv matches the canonical (live-hole-only) equivalent. *)
-      let tbl = Hashtbl.create 4 in
-      List.iteri (fun i h -> Hashtbl.replace tbl h i) live;
-      List.iteri (fun i h -> Hashtbl.replace tbl h (List.length live + i)) dead;
-      let compact = rename_holes (fun n -> try Hashtbl.find tbl n with Not_found -> n) simplified in
+    let dead_v = dead_of vars (fun x y ->
+      rename_leaves (fun v -> if v = x then y else v) (fun n -> n) simplified) in
+    let dead_h = dead_of holes (fun x y ->
+      rename_leaves (fun v -> v) (fun n -> if n = x then y else n) simplified) in
+    if dead_v = [] && dead_h = [] then None else begin
+      let live_v = List.filter (fun v -> not (List.mem v dead_v)) vars in
+      let live_h = List.filter (fun h -> not (List.mem h dead_h)) holes in
+      (* live -> 0..m-1 (first-occurrence order), dead -> m.. , per kind, so
+         the compacted bv matches the canonical (live-leaf-only) equivalent. *)
+      let mk_tbl live dead =
+        let tbl = Hashtbl.create 4 in
+        List.iteri (fun i x -> Hashtbl.replace tbl x i) live;
+        List.iteri (fun i x -> Hashtbl.replace tbl x (List.length live + i)) dead;
+        fun x -> try Hashtbl.find tbl x with Not_found -> x
+      in
+      let fv = mk_tbl live_v dead_v and fh = mk_tbl live_h dead_h in
+      let compact = rename_leaves fv fh simplified in
       match Hashtbl.find_opt behaviors_by_bv (bv_of compact) with
       | None -> None
       | Some irrs ->
@@ -560,21 +591,88 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
         | (s0, _, _) :: _ as smaller ->
           let s_canon = List.fold_left (fun acc (s, _, _) ->
             if Kbo.compare_total sym_cmp s acc < 0 then s else acc) s0 smaller in
-          (* remap the canonical equivalent's holes 0..m-1 onto the live slots *)
-          let live_arr = Array.of_list live in
-          Some (rename_holes
-            (fun i -> if i >= 0 && i < Array.length live_arr then live_arr.(i) else i)
+          (* remap the canonical equivalent's 0..m-1 leaves (per kind) back
+             onto `simplified`'s live slots. *)
+          let live_v_arr = Array.of_list live_v and live_h_arr = Array.of_list live_h in
+          Some (rename_leaves
+            (fun i -> if i >= 0 && i < Array.length live_v_arr then live_v_arr.(i) else i)
+            (fun i -> if i >= 0 && i < Array.length live_h_arr then live_h_arr.(i) else i)
             s_canon)
     end
+  in
+  (* Last-resort constP reduction for a var/mixed term that find_best and
+     dead_leaf_rule both left as a candidate. Its GROUNDED skeleton may have
+     a strictly smaller pure-hole irreducible — e.g. `(((a&(b|c))^c)&b)^c`
+     (size 11) grounds to `((((A&(B|C))^C)&B)^C)`, whose hole normal form
+     `(C^(B&(A^C)))` is size 7. Without this, such a term survives as an
+     over-size pure-var irreducible (larger than ANY hole irreducible),
+     because its own pure-var bv-bucket holds no smaller representative: the
+     minimal term for its positional function needs a non-canonical variable
+     order, so the canonical pure-var form is bloated.
+
+     This fires ONLY after the var-rule path finds nothing, so a function
+     with a compact pure-var form (e.g. `a&a`, reduced by the var rule
+     `a&a -> a`) is never pre-empted — we only ground-reduce functions whose
+     pure-var representative is genuinely awkward. The emitted rule
+     `simp_hole -> hole_nf` is a sound (grounded) size-reducing rule; being
+     size-reducing it fires back on the var term via the hole matcher. *)
+  let lift_holes_to_vars t =
+    let rec go = function
+      | Types.Hole n -> Types.mk_var n
+      | Types.Var _ as v -> v
+      | Types.Node (s, a) -> Types.mk_node s (List.map go a)
+    in go t
+  in
+  let ground_reduce_rule simplified =
+    if Types.distinct_vars simplified = 0 then None  (* already pure hole *)
+    else
+      let simp_hole = Types.canonicalize (Types.vars_to_holes simplified) in
+      match Hashtbl.find_opt behaviors_by_bv (bv_of simp_hole) with
+      | None -> None
+      | Some irrs ->
+        let t_sz = Types.size simplified in
+        match List.filter (fun (s, _, _) -> Types.size s < t_sz) irrs with
+        | [] -> None
+        | (s0, _, _) :: _ as smaller ->
+          let s_canon = List.fold_left (fun acc (s, _, _) ->
+            if Kbo.compare_total sym_cmp s acc < 0 then s else acc) s0 smaller in
+          (* Prefer the more general VARIABLE rule when the lifted RHS is
+             KBO-orientable at the variable level. When `simplified` is
+             pure-var and canonical (vars 0..k-1), `simp_hole` is it with
+             Var i -> Hole i, so the hole normal form `s_canon` lifts back
+             by Hole i -> Var i. If KBO orients the lifted pair on variables
+             (RHS var-counts <= LHS, so the rule is substitution-stable), emit
+             that var rule — it subsumes the constP/hole rule. Otherwise
+             (var-count gate fails, or `simplified` is mixed) fall back to the
+             grounded hole rule, which still fires on the var term as a
+             size-reducing constP rule. *)
+          if Types.distinct_holes simplified = 0 then begin
+            let rhs_var = lift_holes_to_vars s_canon in
+            if Kbo.kbo sym_cmp simplified rhs_var = Kbo.Greater
+            then Some (simplified, rhs_var)
+            else Some (simp_hole, s_canon)
+          end else
+            Some (simp_hole, s_canon)
   in
   let decide ex bv simplified =
     let cand = (simplified, bv, ex) in
     let _ = ex in
     match find_best simplified (equiv_irrs bv) with
     | (None, None) ->
-      (match dead_hole_rule simplified bv with
-       | Some rhs -> Some (D_size_rule ((simplified, rhs), cand, rhs))
-       | None -> Some (D_candidate (simplified, bv, ex)))
+      (* dead_leaf picks a smaller equivalent by size/total-order, which does
+         NOT guarantee substitution-monotone KBO orientation on variables (the
+         RHS could use a live var more often than the LHS). Only emit it as a
+         var rule when KBO orients it (RHS strictly KBO-smaller); otherwise
+         fall through to ground_reduce, whose constP/lifted forms are always
+         oriented. This keeps the invariant: every emitted rule is KBO-Greater
+         (no var-level commutativity / un-oriented rule ever ships). *)
+      (match dead_leaf_rule simplified bv with
+       | Some rhs when Kbo.kbo sym_cmp simplified rhs = Kbo.Greater ->
+         Some (D_size_rule ((simplified, rhs), cand, rhs))
+       | _ ->
+         match ground_reduce_rule simplified with
+         | Some (lhs_hole, rhs) -> Some (D_size_rule ((lhs_hole, rhs), cand, rhs))
+         | None -> Some (D_candidate (simplified, bv, ex)))
     | (None, Some ((lhs_hole, rhs_hole), Size, irr_src)) ->
       Some (D_size_rule ((lhs_hole, rhs_hole), cand, irr_src))
     | (None, Some ((lhs_hole, rhs_hole), Kbo, irr_src)) ->
@@ -590,7 +688,7 @@ let process_term (dom : ('s, 'a) Domain.t) ~compiled_inputs_arr
      rule applies — the term is reducible, so it is not an irreducible
      candidate, and its normal form is enumerated and processed on its
      own. Only terms with no applicable rule reach `decide`. *)
-  match Rewrite.normalize_canonical_or_skip ~sym_cmp ~index:norm_index t with
+  match Rewrite.normalize_canonical_or_skip ?memo ~sym_cmp ~index:norm_index t with
   | None -> None  (* reducible; handled via its normal form *)
   | Some simplified ->
     let bv = Eval.behavior_compiled_arr dom compiled_inputs_arr simplified in
@@ -628,10 +726,32 @@ let apply_decisions (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
      becomes a new irreducible. Without this, runs at low random counts
      silently lose genuinely-new irreducibles when SMT rejects a rule.
      On Assumed (unproven), also record the rule for reporting. *)
-  let commit_rule ~seen ~committed cand rule src_lhs src_rhs =
+  let commit_rule ~seen ~committed cand rule _src_lhs src_rhs =
     let (simplified, bv, ex) = cand in
+    let _ = src_rhs in
     if Hashtbl.mem seen rule then ()
-    else match confirms ex src_lhs src_rhs with
+    (* Backstop: never ship a rule that is not strictly KBO-oriented
+       (RHS KBO-smaller than LHS). A same-size, un-orientable pair — e.g. a
+       variable-level commutativity `(b&a) -> (a&b)`, which KBO leaves
+       Incomparable because distinct vars cannot be ordered under
+       substitution — would be non-terminating, so it is dropped and the
+       candidate is kept as an irreducible instead. (Same-size HOLE rules
+       like `(B&A) -> (A&B)` ARE Greater, since holes are totally ordered, so
+       legitimate constP commutativity is unaffected.) *)
+    else if Kbo.kbo dom.Domain.sym_compare (fst rule) (snd rule) <> Kbo.Greater then
+      candidates := (simplified, bv, ex) :: !candidates
+    (* Confirm the rule's OWN two sides, not (LHS, src_rhs). For ordinary
+       var rules these coincide (`rule = (simplified, irr)`). But a
+       constP-fallback rule is `(simp_hole, irr_hole)` where both sides are
+       the *grounded* (NoVar) forms, while `src_rhs` is still the original
+       var irreducible: confirming `simp_hole` against the var `irr` compares
+       disjoint leaf sets (A,B,C vs a,b,c), so the sound hole rule is wrongly
+       rejected and an over-size var term survives as a spurious irreducible.
+       The two rule sides always share a leaf-kind structure (both var, or
+       both grounded), so equivalence is decided correctly; for a constP rule
+       grounding preserves the equivalence, so confirming the hole sides is
+       exactly the soundness condition for the emitted rule. *)
+    else match confirms ex (fst rule) (snd rule) with
       | Not_equiv -> candidates := (simplified, bv, ex) :: !candidates
       | Unproven ->
         (* Safe mode: don't emit; keep the candidate as a new irreducible
@@ -874,10 +994,21 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
     rs.bv_index_dirty <- false
   end;
   let behaviors_by_bv = rs.bv_index in
-  let f = process_term dom ~compiled_inputs_arr
-            ~norm_index ~behaviors:rs.behaviors
+  (* One reducibility-check memo PER CHUNK: shared subterms within a chunk hit
+     the cache; a fresh memo per chunk keeps it race-free across workers and
+     scoped to this subpass's single `norm_index`. Only in AC mode, where the
+     per-node check (backtracking multiset match) is costly; with the plain
+     discrimination tree the check is already cheap, so the memo's overhead
+     would not pay off. *)
+  let use_memo = Types.ac_enabled () in
+  let f memo = process_term dom ~compiled_inputs_arr
+            ~norm_index ?memo ~behaviors:rs.behaviors
             ~behaviors_by_bv ~use_smt ~sym_cmp in
-  let decisions = parallel_filter_map ~num_domains f enumerated in
+  let per_chunk ch =
+    List.filter_map (f (if use_memo then Some (Rewrite.make_memo ()) else None)) ch in
+  let decisions =
+    parallel_chunks ~num_domains ~threshold:(parallel_threshold * 2)
+      ~per_chunk ~seq:per_chunk enumerated in
   let counts = count_decisions ~enumerated:(List.length enumerated) decisions in
   let (sr, kr, cands) = apply_decisions dom rs
     ~size_seen ~kbo_seen ~use_smt ~smt_vars decisions in
@@ -1370,10 +1501,12 @@ let make_caps ?max_vars ?max_holes ~max_vcs () : Enum.caps =
 let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_domains
       ?(use_smt = false) ?(use_smt_forced = false) ?(assume_unproven = true)
       ?unknown_inputs ?(progress = false) ?(full_orbit = false) ?(converge_window = 1)
-      ?(one_per_class = false)
+      ?(one_per_class = false) ?(ac = false)
       ?max_vars ?max_holes (dom : ('s, 'a) Domain.t)
       ~num_random_inputs ~max_vcs =
   Types.clear_cons_cache ();
+  Types.set_ac_config
+    (if ac then Some (dom.Domain.is_ac, dom.Domain.sym_compare) else None);
   Progress.enabled := progress;
   enum_history := [];
   (match unknown_inputs with Some n -> unknown_extra_inputs := max 0 n | None -> ());
@@ -1424,7 +1557,9 @@ let run ?max_size ?(forced_inputs = []) ?(on_iteration = fun _ _ -> ()) ?num_dom
       if converge_window > 0 && !quiet >= converge_window then continue := false
     end else quiet := 0;
     incr n
-  done; (rs, List.rev !results)
+  done;
+  Types.set_ac_config None;   (* reset global AC mode after the run *)
+  (rs, List.rev !results)
 
 (* Expose resolution for callers that need to print the actual job count. *)
 let effective_num_workers = resolve_num_workers

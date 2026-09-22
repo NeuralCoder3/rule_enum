@@ -304,15 +304,21 @@ let test_holes_required_for_completeness () =
   in
   let missing = List.filter (fun r -> not (var_analogue_in_set r no_rules)) with_rules in
   assert (List.length missing > 0);
-  (* Sanity: every missing rule must contain a hole. *)
-  List.iter (fun (l, r) -> assert (Types.has_hole l || Types.has_hole r)) missing;
-
   let same_sem t1 t2 =
     let k = 1 + max (max_var_id t1) (max_var_id t2) in
     let inputs = Eval.generate_inputs dom 200 (max k 1) in
     List.for_all (fun inp ->
       try Eval.eval dom inp t1 = Eval.eval dom inp t2 with _ -> false) inputs
   in
+  (* Sanity: every missing rule either genuinely needs a hole, OR is a
+     pure-var rule that only the hole run discovers (the ground-reduce path
+     finds a smaller equivalent via the term's grounded skeleton and lifts it
+     back to a KBO-orientable variable rule — category C below, realized
+     directly). A hole-free missing rule must therefore be sound (same_sem)
+     and KBO-oriented (RHS < LHS) on variables. *)
+  List.iter (fun (l, r) ->
+    assert (Types.has_hole l || Types.has_hole r
+            || (same_sem l r && Kbo.kbo sym_cmp r l = Kbo.Less))) missing;
   let cat_a = ref 0 and cat_b = ref 0 and cat_c = ref 0 in
   List.iter (fun (lhs, rhs) ->
     let off = 1 + max (max_var_id lhs) (max_var_id rhs) in
@@ -1235,6 +1241,57 @@ let test_orbit_skip_default () =
   Printf.printf "  orbit-skip default: OK (lean %d rules < full-orbit %d, both confluent on bool size<=7)\n"
     (List.length lean) (List.length full)
 
+(* AC mode: the optional AC matcher (--ac) must (a) yield strictly FEWER
+   rules than the plain run (AC-equal rules/classes collapse), (b) TERMINATE
+   — synthesizing to size 7 exercises var-term normalization to fixpoint,
+   which looped before the `ac_decreases` termination gate — and (c) stay
+   SOUND and CONFLUENT: every ground bool term up to size 7 normalizes
+   modulo AC to a single form per truth-table class. *)
+let test_ac_mode_sound_confluent () =
+  let bcmp = Domain_bool.compare_symbol in
+  let is_ac = Domain_bool.bool_domain.Domain.is_ac in
+  let run ~ac =
+    Random.init 1;
+    let rs, _ = Algorithm.run ~max_size:7 Domain_bool.bool_domain ~num_domains:1
+      ~num_random_inputs:100 ~max_vcs:3 ~max_holes:3 ~use_smt:false ~ac in
+    rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules
+  in
+  let ac_rules = run ~ac:true in           (* terminates ⇒ var-term normalization halts *)
+  let plain_rules = run ~ac:false in
+  assert (List.length ac_rules < List.length plain_rules);   (* AC ⇒ fewer rules *)
+  (* Enable the global AC config for normalization (run reset it on exit). *)
+  Types.set_ac_config (Some (is_ac, bcmp));
+  let tt t = List.concat_map (fun a -> List.concat_map (fun b -> List.map (fun c ->
+    Eval.eval Domain_bool.bool_domain [("A",a);("B",b);("C",c)] t) [false;true]) [false;true]) [false;true] in
+  let terms =
+    let acc = ref [] in
+    for sz = 1 to 7 do acc := all_possible_terms_of_size Domain_bool.all_symbols ~k:3 sz @ !acc done; !acc in
+  let idx = Rewrite.index_rules ac_rules in
+  (* Soundness is checked on the raw norm_bottom result (truth table is
+     positional over A,B,C; canonicalize RENAMES holes so it must not enter
+     the soundness comparison). Confluence groups by the original truth
+     table and compares canonicalized normal forms — canonicalize collapses
+     alpha-variants (incl. the false=X^X / true=~(X^X) constant encodings),
+     so a correct AC system leaves exactly ONE canonical NF per class. *)
+  let n_unsound = ref 0 and groups = Hashtbl.create 256 in
+  List.iter (fun t ->
+    let raw = Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx t in
+    if tt raw <> tt t then incr n_unsound;
+    let k = tt t in
+    Hashtbl.replace groups k (Types.canonicalize raw :: (try Hashtbl.find groups k with Not_found -> []))) terms;
+  assert (!n_unsound = 0);
+  let non_confluent = Hashtbl.fold (fun _ nfs acc ->
+    match List.sort_uniq (Types.term_compare bcmp) nfs with _::_::_ -> acc + 1 | _ -> acc)
+    groups 0 in
+  Types.set_ac_config None;
+  (* Canonicalization collapses alpha-variants (including the false=X^X /
+     true=~(X^X) constant encodings), so a sound+confluent AC system leaves
+     exactly one canonical normal form per truth-table class. *)
+  assert (non_confluent = 0);
+  Printf.printf
+    "  AC mode sound+confluent: OK (%d AC rules < %d plain, terminates, %d ground terms, %d non-confluent [const-encoding])\n"
+    (List.length ac_rules) (List.length plain_rules) (List.length terms) non_confluent
+
 let test_dead_hole_reduction () =
   Random.init 42;
   let k = 3 in
@@ -1390,17 +1447,28 @@ let bstr = Types.to_string Domain_bool.string_of_symbol
    without any per-application order check. *)
 let test_rules_kbo_oriented () =
   let bcmp = Domain_bool.compare_symbol in
-  List.iter (fun full_orbit ->
-    let rs, _ = bool_synth_full ~full_orbit in
-    let rules = rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules in
+  let check label rules =
     let bad = List.filter (fun (l, r) -> Kbo.kbo bcmp l r <> Kbo.Greater) rules in
     if bad <> [] then begin
-      Printf.eprintf "  non-KBO-oriented rules (orbit=%b): %d/%d\n"
-        full_orbit (List.length bad) (List.length rules);
+      Printf.eprintf "  non-KBO-oriented rules (%s): %d/%d\n"
+        label (List.length bad) (List.length rules);
       List.iter (fun (l, r) -> Printf.eprintf "    %s -> %s\n" (bstr l) (bstr r))
         (List.filteri (fun i _ -> i < 12) bad);
       assert false
-    end) [false; true];
+    end
+  in
+  List.iter (fun full_orbit ->
+    let rs, _ = bool_synth_full ~full_orbit in
+    check (Printf.sprintf "orbit=%b" full_orbit)
+      (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules)) [false; true];
+  (* Larger size (11) exercises the dead_leaf and ground_reduce paths, which
+     reduce over-size var terms and lift hole reductions to var rules. These
+     must still ship only KBO-Greater rules — in particular no var-level
+     commutativity (`(b&a) -> (a&b)`, KBO-Incomparable) may slip through. *)
+  let big, _ = Algorithm.run ~max_size:11 bool_dom ~num_domains:4
+    ~forced_inputs:(Domain_bool.all_inputs 3) ~num_random_inputs:0
+    ~max_vcs:3 ~max_holes:3 ~use_smt:false in
+  check "size=11" (big.Algorithm.size_rules @ big.Algorithm.kbo_rules);
   Printf.printf "  rules KBO-oriented: OK\n"
 
 (* (I2) Every recorded irreducible is a genuine normal form: the full rule
@@ -1467,6 +1535,38 @@ let test_one_per_class () =
     rs1.Algorithm.behaviors;
   Printf.printf "  one-per-class optimization: OK (%d <= %d, distinct bv, self-consistent)\n" n1 n0
 
+(* Eval-style simplification (drives the rule-size figures): a term to simplify
+   is GROUND — every leaf is a constant placeholder, not a schema variable. With
+   a COMPLETE rule set, normalizing it the way `bin/main.ml eval_mode` does —
+   reinterpret Vars as Holes, then bottom-up `norm_bottom` — must reach an
+   irreducible, i.e. size <= the largest irreducible ("the wall"). (Leaving the
+   leaves as Vars lets the KBO matcher refuse same-size commutativity rules on
+   them and stalls normalization — the bug behind the median-88 figure.) *)
+let test_eval_constants_reach_wall () =
+  let bcmp = Domain_bool.compare_symbol in
+  (* complete k=2 bool set (converges well before size 13) *)
+  let rs, _ = Algorithm.run ~max_size:13 bool_dom ~num_domains:1
+    ~forced_inputs:(Domain_bool.all_inputs 2) ~num_random_inputs:0
+    ~max_vcs:2 ~max_holes:2 ~use_smt:false ~converge_window:2 in
+  let idx = Rewrite.index_rules (rs.Algorithm.size_rules @ rs.Algorithm.kbo_rules) in
+  let wall = List.fold_left (fun m (t, _, _) -> max m (Types.size t)) 0 rs.Algorithm.behaviors in
+  let terms =
+    let acc = ref [] in
+    for sz = 1 to 8 do
+      acc := all_possible_terms_of_size Domain_bool.all_symbols ~k:2 sz @ !acc
+    done; !acc in
+  let eval_nf t = Rewrite.norm_bottom ~sym_cmp:bcmp ~index:idx (Types.vars_to_holes t) in
+  let over = List.filter (fun t -> Types.size (eval_nf t) > wall) terms in
+  if over <> [] then begin
+    Printf.eprintf "  %d/%d terms did NOT reach the size-%d wall, e.g. %s -> %s\n"
+      (List.length over) (List.length terms) wall
+      (Types.to_string Domain_bool.string_of_symbol (List.hd over))
+      (Types.to_string Domain_bool.string_of_symbol (eval_nf (List.hd over)));
+    assert false
+  end;
+  Printf.printf "  eval-as-constants reaches the wall: OK (%d terms, all <= size %d)\n"
+    (List.length terms) wall
+
 let () = Printf.printf "Running tests...\n";
   test_canonicalize (); test_distinct_vcs (); test_size (); test_has_hole ();
   test_kbo (); test_match_subst (); test_match_var_const ();
@@ -1496,6 +1596,7 @@ let () = Printf.printf "Running tests...\n";
   test_full_soundness_and_completeness ();
   test_all_possible_terms_soundness_and_confluence ();
   test_orbit_skip_default ();
+  test_ac_mode_sound_confluent ();
   test_dead_hole_reduction ();
   test_minimize_rules ();
   test_tier2_accumulates_and_short_circuits ();
@@ -1506,4 +1607,5 @@ let () = Printf.printf "Running tests...\n";
   test_irreducibles_self_consistent ();
   test_orbit_independent_irreducibles ();
   test_one_per_class ();
+  test_eval_constants_reach_wall ();
   Printf.printf "All tests passed!\n"

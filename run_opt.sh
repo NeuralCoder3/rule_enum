@@ -166,3 +166,14 @@ dune build --profile=release bin/main.exe && ./_build/default/bin/main.exe $@
 
 
 
+# ./reproduce_eval.sh synth --domain bool --vcs 3 --max-size 50 --full --random-inputs 0 --out bool_vcs3_v2
+# ./reproduce_eval.sh synth --domain bool --vars 0 --holes 3 --max-size 50 --full --random-inputs 0 --out bool_v0c3_v2
+# ./reproduce_eval.sh synth --domain int  --vcs 3 --max-size 7 --smt --random-inputs 200 --out int_vcs3_s7
+
+# replicate egraphs figure
+# ./reproduce_eval.sh terms-eqsat
+# 
+
+# ./run_opt.sh --domain bool --max-vcs 3 --full --random-inputs 0 --max-size 50 \
+#   --converge-window 0 --stats eval/bool_vcs3_v2.csv --output eval/bool_vcs3_v2.txt \
+#   --rule-output eval/bool_vcs3_v2.rules --irred-output eval/bool_vcs3_v2.irs --jobs 4 --progress

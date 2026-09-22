@@ -82,6 +82,12 @@ def var_name(name):
     return name.upper()                        # fallback for unusual names
 
 
+# Operator-symbol renaming (Ruler symbol -> .rules symbol), set from --rename.
+# Needed for bv: Ruler writes binary subtract as `--` and unary negate as `-`,
+# while our bv domain uses `-` for both (disambiguated by arity).
+RENAME = {}
+
+
 def render(ast):
     kind = ast[0]
     if kind == "var":
@@ -89,12 +95,14 @@ def render(ast):
     if kind == "const":
         return ast[1]
     _, sym, children = ast
-    if len(children) == 1:                     # unary, e.g. (~A)
+    sym = RENAME.get(sym, sym)
+    # Mirror Types.to_string: single-char ops are unary/binary infix; any
+    # multi-char op (e.g. bv `<<`, `>>`) is written prefix `op(a,b,...)`.
+    if len(sym) == 1 and len(children) == 1:    # unary, e.g. (~A)
         return f"({sym}{render(children[0])})"
-    if len(children) == 2:                     # binary, e.g. (A&B)
+    if len(sym) == 1 and len(children) == 2:    # binary infix, e.g. (A&B)
         return f"({render(children[0])}{sym}{render(children[1])})"
-    raise ValueError(f"operator '{sym}' has arity {len(children)}; "
-                     "only unary and binary are supported by the .rules format")
+    return f"{sym}(" + ",".join(render(c) for c in children) + ")"
 
 
 def size(ast):
@@ -132,7 +140,13 @@ def main(argv=None):
     p.add_argument("input", help="Ruler rules JSON file")
     p.add_argument("output", nargs="?",
                    help="output .rules path (default: input with .rules suffix)")
+    p.add_argument("--rename", default="",
+                   help="comma-separated operator renames FROM=TO (e.g. '--=-' for bv)")
     args = p.parse_args(argv)
+
+    for pair in filter(None, args.rename.split(",")):
+        frm, to = pair.split("=", 1)
+        RENAME[frm] = to
 
     out_path = args.output or re.sub(r"\.json$", "", args.input) + ".rules"
 

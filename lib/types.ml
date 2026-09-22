@@ -187,7 +187,7 @@ let canonicalize_max_slots = 32
      matters for non-commutative operators. Holes get renumbered by
      *sorted-id rank* so the relative order of distinct hole ids is
      preserved while the term uses the smallest available ids 0..k-1. *)
-let canonicalize t =
+let canonicalize_rename t =
   let vmap = Array.make canonicalize_max_slots (-1) in
   let vmap_keys = Array.make canonicalize_max_slots 0 in
   let next_v = ref 0 in
@@ -242,7 +242,7 @@ let canonicalize t =
 
 let rec term_compare sym_cmp t1 t2 =
   let s1 = size t1 and s2 = size t2 in
-  if s1 <> s2 then compare s1 s2
+  if s1 <> s2 then Int.compare s1 s2
   else match t1, t2 with
     | Var v1, Var v2 -> Int.compare v1 v2
     | Hole n1, Hole n2 -> Int.compare n1 n2
@@ -260,7 +260,7 @@ and lex_compare sym_cmp args1 args2 =
   | [], [] -> 0
   | a1 :: r1, a2 :: r2 ->
     (match term_compare sym_cmp a1 a2 with 0 -> lex_compare sym_cmp r1 r2 | c -> c)
-  | _ -> compare (List.length args1) (List.length args2)
+  | _ -> Int.compare (List.length args1) (List.length args2)
 
 let term_eq sym_cmp a b = term_compare sym_cmp a b = 0
 
@@ -384,6 +384,203 @@ let apply_var_const vmap hmap t =
     | Hole n -> (match assoc_opt_int n hmap with Some s -> s | None -> Hole n)
     | Node (f, args) -> Node (f, List.map go args)
   in go t
+
+(* ======================================================================
+   Associative-commutative (AC) layer.
+
+   `is_ac f` says operator `f` is associative + commutative (bool: &,|,^;
+   NOT `~`). These operators are always binary here; AC treats a right- or
+   left-nested chain `f(a, f(b, c))` as the multiset {a,b,c}.
+
+   `ac_normalize` puts every AC chain into a canonical form: flatten the
+   chain, recursively normalize and sort the operands (by `term_compare`),
+   and rebuild right-nested. Two AC-equal terms get an identical normal
+   form, so AC-equivalence becomes syntactic equality — this is what makes
+   equivalence classes and rules dedup modulo AC. Idempotence / nilpotence
+   (a&a, a^a) are NOT part of AC and are left to the rules. *)
+let rec ac_normalize is_ac sym_cmp t =
+  match t with
+  | Var _ | Hole _ -> t
+  | Node (f, args) ->
+    let args = List.map (ac_normalize is_ac sym_cmp) args in
+    (match args with
+     | [_; _] when is_ac f ->
+       let rec flat x = match x with
+         | Node (g, [a; b]) when sym_cmp g f = 0 -> flat a @ flat b
+         | _ -> [x]
+       in
+       let ops = List.sort (term_compare sym_cmp) (List.concat_map flat args) in
+       (match List.rev ops with
+        | last :: rest -> List.fold_left (fun acc x -> mk_node f [x; acc]) last rest
+        | [] -> mk_node f args)
+     | _ -> mk_node f args)
+
+let ac_flatten is_ac sym_cmp f t =
+  let rec flat x = match x with
+    | Node (g, [a; b]) when is_ac g && sym_cmp g f = 0 -> flat a @ flat b
+    | _ -> [x]
+  in flat t
+
+(* Shallow AC-normalise: assumes every arg is ALREADY in AC-normal form
+   (true when rebuilding bottom-up during normalization). Only flattens and
+   re-sorts the current head's chain; does NOT recurse into the args'
+   internals the way `ac_normalize` does. O(chain length) instead of the
+   O(size) re-walk of the whole subtree per node, which is the difference
+   between O(n) and O(n^2) work to normalize a term of size n. *)
+let ac_build is_ac sym_cmp f args =
+  match args with
+  | [a; b] when is_ac f ->
+    (* Each canonical arg flattens to a SORTED operand list (right-nested,
+       sorted); merging two sorted lists is O(n), avoiding the O(n log n)
+       re-sort. `flat` walks the right spine of an already-canonical chain. *)
+    let rec flat acc x = match x with
+      | Node (g, [l; r]) when sym_cmp g f = 0 -> flat (flat acc r) l
+      | _ -> x :: acc in
+    let la = flat [] a and lb = flat [] b in
+    let rec merge xs ys = match xs, ys with
+      | [], l | l, [] -> l
+      | x :: xs', y :: ys' ->
+        if term_compare sym_cmp x y <= 0 then x :: merge xs' ys
+        else y :: merge xs ys' in
+    (match merge la lb with
+     | [] -> mk_node f args
+     | [x] -> x
+     | ops -> (match List.rev ops with
+               | last :: rest -> List.fold_left (fun acc x -> mk_node f [x; acc]) last rest
+               | [] -> assert false))
+  | _ -> mk_node f args
+
+(* Rebuild an AC node from an operand list (sorted, right-nested). *)
+let ac_join sym_cmp f ops =
+  match List.sort (term_compare sym_cmp) ops with
+  | [] -> invalid_arg "ac_join: empty"
+  | [x] -> x
+  | ops -> (match List.rev ops with
+            | last :: rest -> List.fold_left (fun acc x -> mk_node f [x; acc]) last rest
+            | [] -> assert false)
+
+(* AC substitution/matching, combined var (any subterm) + hole (size-0
+   leaf, distinct ids -> distinct images; NO order constraint — AC
+   already canonicalises operand order, so the constP orientation gate is
+   unnecessary). `st` = (var map, hole map). Backtracking through AC nodes.
+
+   `ac_match_full` requires the pattern to match the target exactly (no
+   leftover). `ac_match_root` additionally allows, when both heads are the
+   same AC operator, the pattern to match a SUB-multiset of the target's
+   operands, returning the unmatched operands ("extension"): this is what
+   lets `x|(x&y) -> x` fire inside a wider disjunction. *)
+type 's ac_subst = (int * 's term) list * (int * 's term) list
+
+let rec ac_match_full is_ac sym_cmp (vm, hm) pattern target
+    : 's ac_subst option =
+  match pattern, target with
+  | Var pv, _ ->
+    (match assoc_opt_int pv vm with
+     | Some s -> if term_eq sym_cmp s target then Some (vm, hm) else None
+     | None -> Some ((pv, target) :: vm, hm))
+  | Hole ph, _ ->
+    let size0 = match target with Var _ | Hole _ | Node (_, []) -> true | _ -> false in
+    if not size0 then None
+    else (match assoc_opt_int ph hm with
+      | Some s -> if term_eq sym_cmp s target then Some (vm, hm) else None
+      | None ->
+        (* distinct hole ids -> distinct images *)
+        if List.exists (fun (h', img') -> h' <> ph && term_eq sym_cmp img' target) hm
+        then None else Some (vm, (ph, target) :: hm))
+  | Node (pf, pargs), Node (tf, targs) when sym_cmp pf tf = 0 ->
+    if is_ac pf && List.length pargs = 2 && List.length targs = 2 then
+      let ps = ac_flatten is_ac sym_cmp pf pattern in
+      let ts = ac_flatten is_ac sym_cmp tf target in
+      (* full match: every target operand must be covered (no leftover) *)
+      (match ac_match_ops is_ac sym_cmp (vm, hm) ps ts with
+       | Some (st, []) -> Some st
+       | _ -> None)
+    else if List.length pargs = List.length targs then
+      ac_match_list is_ac sym_cmp (vm, hm) pargs targs
+    else None
+  | _ -> None
+
+and ac_match_list is_ac sym_cmp st ps ts =
+  match ps, ts with
+  | [], [] -> Some st
+  | p :: ps', t :: ts' ->
+    (match ac_match_full is_ac sym_cmp st p t with
+     | Some st' -> ac_match_list is_ac sym_cmp st' ps' ts'
+     | None -> None)
+  | _ -> None
+
+(* Assign each pattern operand in `ps` to a DISTINCT target operand in
+   `ts` (recursively, full match), backtracking. Returns the resulting
+   subst and the leftover (unassigned) target operands. First solution. *)
+and ac_match_ops is_ac sym_cmp st ps ts =
+  match ps with
+  | [] -> Some (st, ts)
+  | p :: ps' ->
+    let rec pick before = function
+      | [] -> None
+      | t :: after ->
+        (match ac_match_full is_ac sym_cmp st p t with
+         | Some st' ->
+           (match ac_match_ops is_ac sym_cmp st' ps' (List.rev_append before after) with
+            | Some _ as r -> r
+            | None -> pick (t :: before) after)
+         | None -> pick (t :: before) after)
+    in pick [] ts
+
+let empty_subst : 's ac_subst = ([], [])
+
+(* Match a rule LHS against a target node modulo AC. When both heads are
+   the same AC operator, the LHS may match a SUB-multiset of the target's
+   operands; the unmatched operands are returned as `leftover` (to be
+   re-joined with the RHS). Otherwise it is a plain full match with no
+   leftover. *)
+let ac_match_root is_ac sym_cmp lhs target
+    : ('s ac_subst * 's term list) option =
+  match lhs, target with
+  | Node (lf, [_; _]), Node (tf, [_; _]) when is_ac lf && sym_cmp lf tf = 0 ->
+    let ps = ac_flatten is_ac sym_cmp lf lhs in
+    let ts = ac_flatten is_ac sym_cmp tf target in
+    if List.length ps > List.length ts then None
+    else ac_match_ops is_ac sym_cmp empty_subst ps ts
+  | _ ->
+    (match ac_match_full is_ac sym_cmp empty_subst lhs target with
+     | Some st -> Some (st, [])
+     | None -> None)
+
+let apply_ac_subst (vm, hm) t =
+  let rec go = function
+    | Var v -> (match assoc_opt_int v vm with Some s -> s | None -> Var v)
+    | Hole n -> (match assoc_opt_int n hm with Some s -> s | None -> Hole n)
+    | Node (f, args) -> mk_node f (List.map go args)
+  in go t
+
+(* Global (per-run) AC configuration. `None` = AC off (default; original
+   behaviour). `Some (is_ac, sym_cmp)` turns on AC canonicalisation and
+   matching everywhere. Set ONCE at the start of a run (before any parallel
+   workers) via `set_ac_config`, then only read — safe to share. Stored via
+   Obj because `Types` is polymorphic in the symbol type but a run fixes it
+   to one concrete domain. *)
+let ac_config : Obj.t option ref = ref None
+let set_ac_config (c : (('s -> bool) * ('s -> 's -> int)) option) =
+  ac_config := (match c with None -> None | Some x -> Some (Obj.repr x))
+let ac_enabled () = !ac_config <> None
+let ac_get () : (('s -> bool) * ('s -> 's -> int)) option =
+  match !ac_config with None -> None | Some o -> Some (Obj.obj o)
+
+(* Canonical form. With AC off this is exactly the renaming/hole-rank
+   canonicaliser. With AC on it is the fixpoint of (renaming ∘ AC-normalise):
+   AC-sorting reorders operands, which can change first-occurrence order for
+   the renamer, so we iterate to a fixpoint (converges in ≤ a couple of
+   passes for finite terms). The result is a canonical representative of the
+   term's AC-and-renaming orbit, so AC-equal classes/rules collapse. *)
+let canonicalize (t : 's term) : 's term =
+  match ac_get () with
+  | None -> canonicalize_rename t
+  | Some (is_ac, cmp) ->
+    let rec fix t k =
+      let t' = canonicalize_rename (ac_normalize is_ac cmp t) in
+      if k = 0 || term_compare cmp t' t = 0 then t' else fix t' (k - 1)
+    in fix t 4
 
 (* Reinterpret every `Var i` as a constant placeholder (Hole), treating
    schema variables as constPs for the purpose of KBO ordering. After

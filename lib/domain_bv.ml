@@ -86,6 +86,7 @@ let bv_domain : (symbol, int) Domain.t = {
   Domain.all_symbols = all_symbols;
   Domain.sym_to_string = string_of_symbol;
   Domain.sym_compare = compare_symbol;
+  Domain.is_ac = (function Plus | Times | And | Or -> true | Not | Neg | Minus | Shl | Shr -> false);
   Domain.term_to_string = Types.to_string string_of_symbol;
   Domain.term_of_string = Parse.term_parser all_symbols;
   (* SMT counterexamples come back as unsigned bv numerals in [0, 2^w);

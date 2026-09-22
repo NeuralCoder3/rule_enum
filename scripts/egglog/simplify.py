@@ -370,46 +370,65 @@ def node_count(egraph):
     return sum(size for _, size in egraph.all_function_sizes())
 
 
-def run_rules(egraph, iters, saturate, time_limit=None, node_limit=None):
+def run_rules(egraph, iters, saturate, time_limit=None, node_limit=None,
+              bench=False, label=""):
     """Run the rules one iteration at a time, honouring all stopping criteria.
 
     Stops at the earliest of: saturation, the iteration count (unless
     `saturate`), the wall-clock `time_limit` (seconds), or the e-graph reaching
     `node_limit` e-nodes.  Limits are per e-graph, so in sequential mode they
     apply to each term independently.
+
+    NOTE: the time/node checks happen *between* iterations, so a single
+    `egraph.run(1)` can overshoot the node limit (one iteration is atomic).
+    Returns the stop reason: "saturated" | "iters" | "time" | "node".
     """
     start = time.monotonic()
     i = 0
+    reason = "iters"
     while saturate or i < iters:
-        if time_limit is not None and time.monotonic() - start >= time_limit:
-            break
-        if node_limit is not None and node_count(egraph) >= node_limit:
-            break
+        elapsed = time.monotonic() - start
+        nodes = node_count(egraph)
+        if bench:
+            print(f"  [{label}] iter={i} nodes={nodes} t={elapsed:.1f}s", file=sys.stderr)
+        if time_limit is not None and elapsed >= time_limit:
+            reason = "time"; break
+        if node_limit is not None and nodes >= node_limit:
+            reason = "node"; break
         report = egraph.run(1)
         i += 1
         if not report.updated:        # fixpoint reached -- nothing left to do
-            break
+            reason = "saturated"; break
+    if bench:
+        print(f"  [{label}] STOP reason={reason} iters={i} "
+              f"nodes={node_count(egraph)} t={time.monotonic() - start:.1f}s",
+              file=sys.stderr)
+    return reason
 
 
-def simplify_sequential(terms, rules, iters, saturate, time_limit, node_limit):
-    out = []
+def simplify_sequential(terms, rules, iters, saturate, time_limit, node_limit, bench=False):
+    out, reasons = [], {}
     for idx, ast in enumerate(terms):
         egraph = EGraph()
         egraph.register(*rules)
         handle = egraph.let(f"t{idx}", build(ast, {}))
-        run_rules(egraph, iters, saturate, time_limit, node_limit)
+        r = run_rules(egraph, iters, saturate, time_limit, node_limit)
+        reasons[r] = reasons.get(r, 0) + 1
         out.append(decode_extracted(egraph.extract(handle)))
         if (idx + 1) % 100 == 0:
             print(f"  ...{idx + 1} terms", file=sys.stderr)
+    if bench:
+        print(f"  [sequential] per-term stop reasons: {reasons}", file=sys.stderr)
     return out
 
 
-def simplify_parallel(terms, rules, iters, saturate, time_limit, node_limit):
+def simplify_parallel(terms, rules, iters, saturate, time_limit, node_limit, bench=False):
     egraph = EGraph()
     egraph.register(*rules)
     handles = [egraph.let(f"t{idx}", build(ast, {}))
                for idx, ast in enumerate(terms)]
-    run_rules(egraph, iters, saturate, time_limit, node_limit)
+    run_rules(egraph, iters, saturate, time_limit, node_limit,
+              bench=bench, label="parallel")
     return [decode_extracted(egraph.extract(h)) for h in handles]
 
 
@@ -449,6 +468,9 @@ def main(argv=None):
                         "(per e-graph)")
     p.add_argument("--limit", type=int, default=None,
                    help="only process the first N terms (for quick tests)")
+    p.add_argument("--bench", action="store_true",
+                   help="log per-iteration node counts and the stop reason "
+                        "(saturated/iters/time/node) to stderr")
     args = p.parse_args(argv)
 
     parse_term = PARSERS[args.in_notation]
@@ -478,7 +500,7 @@ def main(argv=None):
     cap_str = f", capped at {' / '.join(caps)}" if caps else ""
     print(f"running {args.mode} eqsat ({how}{cap_str})...", file=sys.stderr)
     results = run(terms, rules, args.iters, args.saturate,
-                  args.time_limit, args.node_limit)
+                  args.time_limit, args.node_limit, bench=args.bench)
 
     before = sum(ast_size(t) for t in terms)
     after = sum(ast_size(r) for r in results)

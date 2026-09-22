@@ -19,9 +19,17 @@
  (libraries rule_enum))
 
 (executable
+ (name check_oriented)
+ (libraries rule_enum))
+
+(executable
  (name profile)
  (libraries rule_enum))
 
 (executable
  (name profile_inner)
+ (libraries rule_enum))
+
+(executable
+ (name ac_check)
  (libraries rule_enum))
