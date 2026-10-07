@@ -1,7 +1,7 @@
 # Evaluation
 
-Reproduces the evaluation of the paper. `paper.py` writes its figures. Results and their comparison with an exemplatory 
-Docker run are in [RESULTS.md](RESULTS.md).
+Reproduces the evaluation of the paper. `paper.py` writes its figures. The expected results of every
+experiment, with the variation to expect, are in [RESULTS.md](RESULTS.md).
 
 ```
 dune build                      # in ..
