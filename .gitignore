@@ -2,3 +2,4 @@ _build/
 *.zip
 demo/
 check.sh
+*.ignore.*

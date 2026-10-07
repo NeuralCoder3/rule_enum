@@ -5,5 +5,10 @@
 !test
 !eval/*.py
 !eval/run.sh
+!eval/bool_complete_generator.p
 !eval/docker
+!eval/tools
+eval/tools/build
+eval/tools/venv
+eval/tools/bin
 **/__pycache__

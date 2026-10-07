@@ -1,0 +1,13 @@
+# out/synth/*.rules
+# out/synth/*.irs
+# out/synth/*.tmp
+# out/terms/
+# out/greedy/
+# out/egraph/
+# out/twee/*.out
+# out/ruler/*.rules
+__pycache__/
+out-docker/
+tools/build/
+tools/venv/
+tools/bin/
