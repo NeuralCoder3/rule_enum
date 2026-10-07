@@ -1,4 +1,5 @@
+(include_subdirs unqualified)
+
 (library
  (name rule_enum)
- (modules types kbo domain domain_demo domain_int domain_bv domain_bool eval rewrite enum smt algorithm parse progress)
- (libraries unix str z3))
+ (libraries unix))
