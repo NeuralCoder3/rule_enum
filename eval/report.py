@@ -61,7 +61,7 @@ def cdf_panel(ax, results, labels, title):
 
 
 def synthesis():
-    leaves = {"bool_v0c3": 3, "bool_vcs3": 6, "bool_v0c3_ac": 3, "bool_vcs3_ac": 6}
+    leaves = {"bool_v0c3": 3, "bool_vcs3": 6}
     for stem, c0 in leaves.items():
         r = rows(stem)
         if not r:
@@ -178,8 +178,7 @@ def twee():
 def series_name(stem):
     if stem == "Ruler":
         return "Ruler (e-graph)"
-    kind = "constants" if "_v0c" in stem else "variables"
-    return kind + (", AC" if stem.endswith("_ac") else "")
+    return "constants" if "_v0c" in stem else "variables"
 
 
 def sweeps():

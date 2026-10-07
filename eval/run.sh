@@ -36,7 +36,7 @@ terms() {  # DOMAIN SIZE COUNT [VARIABLES]
   echo "$f.txt"
 }
 
-greedy() {  # DOMAIN RULES TERMS OUT [--ac]
+greedy() {  # DOMAIN RULES TERMS OUT [ARGS...]
   "$BIN" --lower-vars --domain "$1" --eval --rules-input "$2" --terms-input "$3" --output "$4" "${@:5}" > /dev/null
 }
 
@@ -58,12 +58,10 @@ ruler_json() {  # RULES: our rules as Ruler equations (constants become pattern 
   echo "$f"
 }
 
-# Convergence and synthesis time on the boolean theory, plain and AC
+# Convergence and synthesis time on the boolean theory
 exp_synthesis() {
   synth bool_v0c3 --domain bool --max-vars 0 --max-holes 3 --max-size 50
   synth bool_vcs3 --domain bool --max-vcs 3 --max-size 50
-  synth bool_v0c3_ac --domain bool --max-vars 0 --max-holes 3 --max-size 50 --ac
-  synth bool_vcs3_ac --domain bool --max-vcs 3 --max-size 50 --ac
 }
 
 # Int and bitvector theories within a time budget per run
@@ -159,9 +157,9 @@ exp_twee() {
   python3 stats.py "$OUT/results/twee.json" "${specs[@]}"
 }
 
-# simplification vs maximal rule size, greedy (plain and AC) vs Ruler in an e-graph
+# simplification vs maximal rule size, greedy vs Ruler in an e-graph
 exp_sweep() {
-  sweep_domain bool bool 1000 100 14 "bool_v0c3 bool_vcs3 bool_v0c3_ac bool_vcs3_ac" "2:5 3:7 4:9"
+  sweep_domain bool bool 1000 100 14 "bool_v0c3 bool_vcs3" "2:5 3:7 4:9"
   sweep_domain int int 500 50 12 "int_v0c3 int_vcs3" "2:7"
   sweep_domain bv4 bv 500 50 10 "bv4_v0c3 bv4_vcs3" "2:5 3:7"
   sweep_domain bv32 bv 500 50 8 "bv32_v0c3 bv32_vcs3" "2:5"
@@ -172,11 +170,10 @@ sweep_domain() {  # NAME DOMAIN TERM_SIZE COUNT MAX_RULE_SIZE STEMS RULER_ITER:S
   t=$(terms "$domain" "$3" "$4")
   [ "$domain" = bv ] && width=(--bv-width "${name#bv}")
   for stem in $6; do
-    local ac=(); [[ $stem == *_ac ]] && ac=(--ac)
     for n in $(seq 3 "$5"); do
       local rules; rules=$(capped "$stem" "$n")
       [ "$n" -gt 3 ] && cmp -s "$rules" "$(capped "$stem" $((n - 1)))" && continue
-      [ -s "$OUT/greedy/sweep_${stem}_s$n.txt" ] || greedy "$domain" "$rules" "$t" "$OUT/greedy/sweep_${stem}_s$n.txt" "${width[@]}" "${ac[@]}"
+      [ -s "$OUT/greedy/sweep_${stem}_s$n.txt" ] || greedy "$domain" "$rules" "$t" "$OUT/greedy/sweep_${stem}_s$n.txt" "${width[@]}"
       specs+=("$stem $n=$OUT/greedy/sweep_${stem}_s$n.txt")
     done
   done
@@ -225,9 +222,8 @@ exp_constants() {
 exp_validate() {
   { if [ -n "${TESTS:-}" ]; then "$TESTS"; else (cd .. && dune test --force); fi; } 2>&1 | grep -c " ok$" | sed 's/$/ checks passed/'
   python3 ground_check.py gen "$OUT/terms/ground8.txt" 8
-  for stem in bool_v0c3 bool_vcs3 bool_v0c3_ac bool_vcs3_ac; do
-    local ac=(); [[ $stem == *_ac ]] && ac=(--ac)
-    greedy bool "$OUT/synth/$stem.rules" "$OUT/terms/ground8.txt" "$OUT/greedy/ground8_$stem.txt" "${ac[@]}"
+  for stem in bool_v0c3 bool_vcs3; do
+    greedy bool "$OUT/synth/$stem.rules" "$OUT/terms/ground8.txt" "$OUT/greedy/ground8_$stem.txt"
     echo "$stem: $(python3 ground_check.py check "$OUT/terms/ground8.txt" "$OUT/greedy/ground8_$stem.txt")"
   done
 }

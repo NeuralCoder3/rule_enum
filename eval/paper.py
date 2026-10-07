@@ -112,7 +112,7 @@ def sweeps():
         for label, v in r.items():
             stem, n = label.rsplit(" ", 1)
             out.setdefault(stem, []).append((int(n), v["median"]))
-        kinds = sorted(k for k in out if k != "Ruler" and not k.endswith("_ac"))
+        kinds = sorted(k for k in out if k != "Ruler")
         return [coords(sorted(out[k]), lambda y: f"{y:.1f}") for k in kinds + ["Ruler"]]
 
     median = lambda s: s.replace("ylabel={mean size of simplified term}", "ylabel={median size of simplified term}")
