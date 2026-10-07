@@ -4,12 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ORIG=${ORIG:-$(cd ../../rule_enum && pwd)}
 BIN=${BIN:-$(cd .. && pwd)/_build/default/bin/main.exe}
-RULER=${RULER:-$ORIG/scripts/ruler/target/release}
-EGGLOG_PY=${EGGLOG_PY:-$ORIG/scripts/egglog/venv/bin/python}
-TWEE=${TWEE:-$(cd ../../.. && pwd)/twee/other/twee_upstream/dist-newstyle/build/x86_64-linux/ghc-9.12.2/twee-2.6/x/twee/build/twee/twee}
-TWEE_AXIOMS=${TWEE_AXIOMS:-$ORIG/scripts/twee/bool_complete_generator.p}
+RULER=${RULER:-tools/build/ruler/target/release}
+EGGLOG_PY=${EGGLOG_PY:-tools/venv/bin/python}
+TWEE=${TWEE:-tools/bin/twee}
+TWEE_AXIOMS=${TWEE_AXIOMS:-bool_complete_generator.p}
 OUT=${OUT:-out}
 BUDGET=${BUDGET:-600}
 MEMORY_KB=${MEMORY_KB:-10000000}

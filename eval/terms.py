@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Random terms of an exact size: uniform over tree shapes, leaves drawn
-uniformly from k variables and renamed by first occurrence. Draws random
-numbers in the same order as ../rule_enum/scripts/termgen.py."""
+uniformly from k variables and renamed by first occurrence; reproducible
+by seed."""
 import argparse
 import random
 import sys
