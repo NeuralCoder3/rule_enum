@@ -87,6 +87,7 @@ Equivalence is decided exhaustively for bv4 and with Z3 for int and bv32 (200 ra
 600 s). On a slower or loaded machine the run stops at size 7, and Fig. 8 then
 lacks the point at size 8. 
 `BUDGET=700 ./run.sh budget sweep` recomputes both.
+`docker run --rm -u "$(id -u):$(id -g)" -e BUDGET=700 -v "$PWD/eval/out-docker:/eval/out" rule-enum-eval budget sweep` for docker.
 
 ## `coverage`: coverage against Ruler (Table 1)
 

@@ -1,6 +1,7 @@
 # Compass: Synthesis of Term Rewriting Systems with Bounded Completeness
 
-POPL 2027: TODO
+[POPL 2027](https://conf.researchr.org/home/POPL-2027): TODO
+Zenodo: https://doi.org/10.5281/zenodo.23215271
 
 ![Algorithm](doc/alg.png)
 

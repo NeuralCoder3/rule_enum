@@ -60,6 +60,7 @@ External tools are built by `tools/setup.sh` into `tools/build`, `tools/bin` and
 
 ```
 docker build -f eval/docker/Dockerfile -t rule-enum-eval .      # in .., about 10 minutes
+mkdir -p eval/out-docker                                        # else Docker creates it owned by root
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/eval/out-docker:/eval/out" rule-enum-eval      # all, or experiments
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/eval/out-docker:/eval/out" --entrypoint python3 rule-enum-eval report.py
 ```
