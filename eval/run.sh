@@ -9,6 +9,7 @@ RULER=${RULER:-tools/build/ruler/target/release}
 EGGLOG_PY=${EGGLOG_PY:-tools/venv/bin/python}
 TWEE=${TWEE:-tools/bin/twee}
 TWEE_AXIOMS=${TWEE_AXIOMS:-bool_complete_generator.p}
+[ -d tools/venv/bin ] && PATH="$PWD/tools/venv/bin:$PATH"  # z3 and the Python packages of tools/setup.sh
 OUT=${OUT:-out}
 BUDGET=${BUDGET:-600}
 MEMORY_KB=${MEMORY_KB:-10000000}
