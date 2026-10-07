@@ -356,6 +356,16 @@ type 's check_res = Irr of 's Types.term | Red
 type 's memo = ('s Types.term, 's check_res) Hashtbl.t
 let make_memo () : 's memo = Hashtbl.create 4096
 
+(* Worker-SHARED memo — two variants TRIED, both LOST to the per-chunk Local
+   Hashtbl below:
+   - 256-shard mutex-striped table: ~2.4x slower single-thread, ~25% parallel
+     (per-access lock + extra shard hash on millions of lookups; contention).
+   - lock-free Saturn.Htbl (`saturn` opam pkg): fixed the mutex disaster but
+     still ~10% slower single-thread (Saturn's CAS per-op cost, no sharing
+     benefit at 1 worker) and TIED in parallel on 8 cores (sharing's higher
+     hit rate cancels the per-op overhead). Might win on many-core where
+     per-chunk's hit-rate dilution grows; not worth the dependency here. *)
+
 let normalize_canonical_or_skip_plain ~sym_cmp ~index t =
   if no_skip then begin
     (* Conservative: skip only on strict size reduction; for same-size

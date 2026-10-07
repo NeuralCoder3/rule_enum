@@ -995,11 +995,11 @@ let run_subpass (dom : ('s, 'a) Domain.t) (rs : ('s, 'a) rule_sets)
   end;
   let behaviors_by_bv = rs.bv_index in
   (* One reducibility-check memo PER CHUNK: shared subterms within a chunk hit
-     the cache; a fresh memo per chunk keeps it race-free across workers and
-     scoped to this subpass's single `norm_index`. Only in AC mode, where the
-     per-node check (backtracking multiset match) is costly; with the plain
-     discrimination tree the check is already cheap, so the memo's overhead
-     would not pay off. *)
+     the cache; a fresh memo per chunk keeps it race-free across workers (no
+     locking) and scoped to this subpass's single `norm_index`. Worker-shared
+     variants (mutex-striped and lock-free Saturn) were tried and lost — see
+     rewrite.ml. Only in AC mode, where the per-node check (backtracking
+     multiset match) is costly; the plain discrimination-tree check is cheap. *)
   let use_memo = Types.ac_enabled () in
   let f memo = process_term dom ~compiled_inputs_arr
             ~norm_index ?memo ~behaviors:rs.behaviors
