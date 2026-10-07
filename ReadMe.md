@@ -1,5 +1,4 @@
-# Compass: Synthesis of Term Rewriting Systems with
-Bounded Completeness
+# Compass: Synthesis of Term Rewriting Systems with Bounded Completeness
 
 POPL 2027: TODO
 
